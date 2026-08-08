@@ -2,6 +2,14 @@ import XCTest
 @testable import Uziq
 
 final class SpotifyTests: XCTestCase {
+    func testArtistCatalogRequestsRespectDevelopmentModeLimits() {
+        XCTAssertEqual(SpotifyStore.artistAlbumsPageLimit, 10)
+        XCTAssertEqual(
+            SpotifyStore.artistRadioSearchQuery(for: "Artist \"Name\""),
+            "artist:\"Artist \\\"Name\\\"\""
+        )
+    }
+
     func testSpotifyPCMIsDeinterleavedIntoStableChannelBuffers() throws {
         let samples: [Float] = [0.1, -0.1, 0.25, -0.25, 0.75, -0.75]
         var data = samples.withUnsafeBytes { Data($0) }

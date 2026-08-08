@@ -9,6 +9,14 @@ import SpotifyWebAPI
 final class SpotifyStore {
     static let redirectURI = SpotifyLoopbackServer.callbackURL
     static let likedSongsID = "uziq:spotify:liked-songs"
+    nonisolated static let artistAlbumsPageLimit = 10
+
+    nonisolated static func artistRadioSearchQuery(for artistName: String) -> String {
+        let escaped = artistName
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "artist:\"\(escaped)\""
+    }
 
     var clientID: String {
         didSet {
@@ -34,6 +42,8 @@ final class SpotifyStore {
     private(set) var selectedArtist: SpotifyCatalogItem?
     private(set) var artistAlbums: [SpotifyCatalogItem] = []
     private(set) var artistTopTracks: [SpotifyCatalogItem] = []
+    private(set) var artistAlbumsError: String?
+    private(set) var artistRadioError: String?
     private(set) var isLoadingArtist = false
     private(set) var playback: SpotifyPlaybackSnapshot?
     private(set) var isLoading = false
@@ -310,6 +320,8 @@ final class SpotifyStore {
         selectedArtist = artist
         artistAlbums = []
         artistTopTracks = []
+        artistAlbumsError = nil
+        artistRadioError = nil
         error = nil
         isLoadingArtist = true
         artistTopTracksFinished = false
@@ -317,16 +329,22 @@ final class SpotifyStore {
         let generation = UUID()
         artistLoadGeneration = generation
         loadArtistAlbums(artist, offset: 0, accumulated: [], generation: generation)
-        api.artistTopTracks(artist.uri, country: "from_token")
+        api.search(
+            query: Self.artistRadioSearchQuery(for: artist.name),
+            categories: [.track],
+            limit: 10
+        )
             .receive(on: DispatchQueue.main)
             .sink { [weak self] completion in
                 guard let self, artistLoadGeneration == generation else { return }
                 artistTopTracksFinished = true
                 finishArtistLoadingIfReady()
-                if case .failure(let error) = completion { self.error = error.localizedDescription }
-            } receiveValue: { [weak self] tracks in
+                if case .failure(let error) = completion {
+                    artistRadioError = error.localizedDescription
+                }
+            } receiveValue: { [weak self] result in
                 guard let self, artistLoadGeneration == generation else { return }
-                artistTopTracks = tracks.map(Self.catalogItem)
+                artistTopTracks = result.tracks?.items.map(Self.catalogItem) ?? []
             }
             .store(in: &cancellables)
     }
@@ -336,6 +354,8 @@ final class SpotifyStore {
         selectedArtist = nil
         artistAlbums = []
         artistTopTracks = []
+        artistAlbumsError = nil
+        artistRadioError = nil
         isLoadingArtist = false
     }
 
@@ -564,8 +584,8 @@ final class SpotifyStore {
         api.artistAlbums(
             artist.uri,
             groups: [.album, .single],
-            country: "from_token",
-            limit: 50,
+            country: nil,
+            limit: Self.artistAlbumsPageLimit,
             offset: offset
         )
         .receive(on: DispatchQueue.main)
@@ -574,7 +594,7 @@ final class SpotifyStore {
             if case .failure(let error) = completion {
                 artistAlbumsFinished = true
                 finishArtistLoadingIfReady()
-                self.error = error.localizedDescription
+                artistAlbumsError = error.localizedDescription
             }
         } receiveValue: { [weak self] page in
             guard let self, artistLoadGeneration == generation else { return }

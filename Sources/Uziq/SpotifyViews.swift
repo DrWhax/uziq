@@ -406,7 +406,14 @@ private struct SpotifyArtistDetail: View {
     }
 
     @ViewBuilder private var albums: some View {
-        if spotify.artistAlbums.isEmpty {
+        if let error = spotify.artistAlbumsError {
+            ContentUnavailableView(
+                "Couldn’t load releases",
+                systemImage: "exclamationmark.triangle",
+                description: Text(error)
+            )
+            .frame(maxWidth: .infinity, minHeight: 220)
+        } else if spotify.artistAlbums.isEmpty {
             ContentUnavailableView(
                 "No releases found",
                 systemImage: "square.stack.3d.up.slash",
@@ -427,7 +434,14 @@ private struct SpotifyArtistDetail: View {
     }
 
     @ViewBuilder private var radio: some View {
-        if spotify.artistTopTracks.isEmpty {
+        if let error = spotify.artistRadioError {
+            ContentUnavailableView(
+                "Couldn’t build radio tracks",
+                systemImage: "exclamationmark.triangle",
+                description: Text(error)
+            )
+            .frame(maxWidth: .infinity, minHeight: 180)
+        } else if spotify.artistTopTracks.isEmpty {
             ContentUnavailableView(
                 "Radio is still available",
                 systemImage: "dot.radiowaves.left.and.right",
