@@ -6,12 +6,14 @@ struct UziqApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var library = LibraryStore()
     @State private var playback = PlaybackEngine()
+    @State private var bandcamp = BandcampStore()
 
     var body: some Scene {
         WindowGroup("Uziq") {
             ContentView()
                 .environment(library)
                 .environment(playback)
+                .environment(bandcamp)
                 .frame(minWidth: 980, minHeight: 640)
         }
         .commands {
@@ -34,6 +36,8 @@ struct UziqApp: App {
         Settings {
             SettingsView()
                 .environment(library)
+                .environment(playback)
+                .environment(bandcamp)
         }
     }
 }

@@ -23,6 +23,8 @@ final class LibraryStore {
     var isEnrichingArtwork = false
     var artworkProgress: ArtworkProgress?
     var artistArtwork: [String: Data] = [:]
+    var artistProfiles: [String: ArtistProfile] = [:]
+    var artistProfilesLoading: Set<String> = []
     var isEnrichingArtistArtwork = false
     var artistArtworkProgress: ArtistArtworkProgress?
     var lastError: String?
@@ -30,6 +32,7 @@ final class LibraryStore {
     var folderRoots: [URL] = []
     var matchingTrackID: String?
     var playlists: [PlaylistSummary] = []
+    var favoriteTrackIDs: Set<String> = []
 
     @ObservationIgnored private let database = LibraryDatabase()
     @ObservationIgnored private let scanner = LibraryScanner()
@@ -60,6 +63,7 @@ final class LibraryStore {
         }
         Task {
             await refresh()
+            await loadFavoriteTrackIDs()
             await loadPlaylists()
             await loadArtistArtwork()
             startArtworkEnrichment()
@@ -75,7 +79,7 @@ final class LibraryStore {
         switch selectedSection {
         case .recentlyAdded:
             return Array(tracks.sorted { $0.addedAt > $1.addedAt }.prefix(100))
-        case .artists, .albums, .genres, .playlists, .mostPlayed, .library, .settings:
+        case .artists, .albums, .genres, .playlists, .mostPlayed, .bandcamp, .library, .settings:
             return tracks
         }
     }
@@ -268,12 +272,27 @@ final class LibraryStore {
         }
     }
 
-    private func loadArtistArtwork() async {
+    func loadArtistArtwork() async {
         do {
-            artistArtwork = try await database.fetchArtistArtwork()
+            artistArtwork = try await database.fetchArtistArtwork().filter {
+                !LastFMClient.isPlaceholderImage($0.value)
+            }
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    func refreshArtistArtworkIfNeeded() {
+        guard !lastFMAPIKey.isEmpty else { return }
+        startArtistArtworkEnrichment()
+    }
+
+    func artistArtworkData(for artist: String) -> Data? {
+        if let artwork = artistArtwork[artist] { return artwork }
+        let normalized = artist.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return artistArtwork.first {
+            $0.key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalized
+        }?.value
     }
 
     func fetchArtistArtwork() {
@@ -284,16 +303,66 @@ final class LibraryStore {
         startArtistArtworkEnrichment()
     }
 
+    func loadArtistProfile(for artist: String) {
+        let normalizedArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedArtist.isEmpty,
+              artistProfiles[normalizedArtist] == nil,
+              !artistProfilesLoading.contains(normalizedArtist) else { return }
+
+        artistProfilesLoading.insert(normalizedArtist)
+        let lastFMAPIKey = self.lastFMAPIKey
+        Task { [weak self] in
+            let lastFMProfile = await LastFMClient(apiKey: lastFMAPIKey).artistBiography(for: normalizedArtist)
+            let profile: ArtistProfile?
+            if let lastFMProfile {
+                profile = ArtistProfile(summary: lastFMProfile, source: .lastFM)
+            } else if let bandcampProfile = await BandcampClient().artistBiography(for: normalizedArtist) {
+                profile = ArtistProfile(summary: bandcampProfile, source: .bandcamp)
+            } else {
+                profile = nil
+            }
+
+            guard let self else { return }
+            if let profile {
+                self.artistProfiles[normalizedArtist] = profile
+            }
+            self.artistProfilesLoading.remove(normalizedArtist)
+        }
+    }
+
     func clearError() { lastError = nil }
 
+    func isFavorite(_ track: Track) -> Bool {
+        favoriteTrackIDs.contains(track.id)
+    }
+
     func toggleFavorite(_ track: Track) {
+        if favoriteTrackIDs.contains(track.id) {
+            favoriteTrackIDs.remove(track.id)
+        } else {
+            favoriteTrackIDs.insert(track.id)
+        }
         Task {
             do {
                 try await database.toggleFavorite(trackID: track.id)
                 await refresh()
+                await loadFavoriteTrackIDs()
             } catch {
+                if favoriteTrackIDs.contains(track.id) {
+                    favoriteTrackIDs.remove(track.id)
+                } else {
+                    favoriteTrackIDs.insert(track.id)
+                }
                 lastError = error.localizedDescription
             }
+        }
+    }
+
+    private func loadFavoriteTrackIDs() async {
+        do {
+            favoriteTrackIDs = Set(try await database.fetchTracks(favoritesOnly: true).map(\.id))
+        } catch {
+            lastError = error.localizedDescription
         }
     }
 

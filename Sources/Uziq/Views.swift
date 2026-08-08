@@ -81,6 +81,10 @@ struct SidebarView: View {
                 }
             }
             Section {
+                Label(LibrarySection.bandcamp.title, systemImage: LibrarySection.bandcamp.systemImage)
+                    .tag(LibrarySection.bandcamp)
+            }
+            Section {
                 Label(LibrarySection.settings.title, systemImage: LibrarySection.settings.systemImage)
                     .tag(LibrarySection.settings)
             }
@@ -107,6 +111,8 @@ struct LibraryContentView: View {
                 SettingsView()
             } else if library.selectedSection == .playlists {
                 PlaylistsLibraryView()
+            } else if library.selectedSection == .bandcamp {
+                BandcampLibraryView()
             } else if library.tracks.isEmpty && library.selectedSection != .mostPlayed {
                 EmptyLibraryView()
             } else {
@@ -123,6 +129,8 @@ struct LibraryContentView: View {
                     PlaylistsLibraryView()
                 case .mostPlayed:
                     TrackListView()
+                case .bandcamp:
+                    BandcampLibraryView()
                 case .settings:
                     SettingsView()
                 }
@@ -364,24 +372,60 @@ struct ArtistsLibraryView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     LibraryHeading(title: "Artists", subtitle: "\(artists.count) artists")
-                    LazyVStack(spacing: 0) {
-                        ForEach(artists) { artist in
-                            Button { selectedArtist = artist } label: {
-                                ArtistRow(artist: artist)
+                    ForEach(artistSections) { section in
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(section.letter)
+                                .font(.title2.weight(.bold))
+                                .foregroundStyle(.secondary)
+                            LazyVGrid(
+                                columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible())],
+                                spacing: 10
+                            ) {
+                                ForEach(section.artists) { artist in
+                                    Button { selectedArtist = artist } label: {
+                                        ArtistRow(artist: artist, showDivider: false)
+                                            .padding(.horizontal, 12)
+                                            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                 }
                 .padding(28)
-            }
-            .navigationDestination(item: $selectedArtist) { artist in
-                ArtistDetailView(artist: artist)
-            }
+        }
+        .navigationDestination(item: $selectedArtist) { artist in
+            ArtistDetailView(artist: artist)
+        }
+        .task {
+            await library.loadArtistArtwork()
+            library.refreshArtistArtworkIfNeeded()
+        }
         }
     }
 
     private var artists: [ArtistGroup] { ArtistGroup.grouped(library.displayedTracks) }
+
+    private var artistSections: [ArtistLetterSection] {
+        Dictionary(grouping: artists) { artist in
+            guard let first = artist.name.trimmingCharacters(in: .whitespacesAndNewlines).first,
+                  first.isLetter else { return "#" }
+            return String(first).uppercased()
+        }
+        .map { ArtistLetterSection(letter: $0.key, artists: $0.value) }
+        .sorted {
+            if $0.letter == "#" { return false }
+            if $1.letter == "#" { return true }
+            return $0.letter < $1.letter
+        }
+    }
+}
+
+private struct ArtistLetterSection: Identifiable {
+    let letter: String
+    let artists: [ArtistGroup]
+    var id: String { letter }
 }
 
 struct GenresLibraryView: View {
@@ -482,7 +526,9 @@ struct ArtistDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     HStack(alignment: .center, spacing: 18) {
-                        ArtworkView(data: library.artistArtwork[artist.name] ?? artist.albums.first?.artworkData)
+                        ArtworkView(data: library.artistArtwork[artist.name]
+                            ?? library.artistArtworkData(for: artist.name)
+                            ?? artist.albums.first?.artworkData)
                             .frame(width: 120, height: 120)
                             .clipShape(Circle())
                         VStack(alignment: .leading, spacing: 6) {
@@ -491,6 +537,26 @@ struct ArtistDetailView: View {
                             Text("\(artist.albums.count) albums · \(artist.tracks.count) tracks")
                                 .foregroundStyle(.secondary)
                         }
+                    }
+                    if let profile = library.artistProfiles[artist.name] {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 8) {
+                                Text("About \(artist.name)")
+                                    .font(.title2.weight(.bold))
+                                Text(profile.source.title)
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(.quaternary, in: Capsule())
+                            }
+                            Text(shortSummary(profile.summary))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: 720, alignment: .leading)
+                        }
+                    } else if library.artistProfilesLoading.contains(artist.name) {
+                        ProgressView("Loading artist information…")
                     }
                     Text("Albums")
                         .font(.title2.weight(.bold))
@@ -520,6 +586,29 @@ struct ArtistDetailView: View {
             }
         }
         .navigationTitle(artist.name)
+        .task(id: artist.name) {
+            await library.loadArtistArtwork()
+            library.refreshArtistArtworkIfNeeded()
+            library.loadArtistProfile(for: artist.name)
+        }
+    }
+
+    private func shortSummary(_ text: String) -> String {
+        var sentences: [String] = []
+        var current = ""
+        for character in text {
+            current.append(character)
+            if ".!?".contains(character) {
+                let sentence = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !sentence.isEmpty { sentences.append(sentence) }
+                current = ""
+                if sentences.count == 2 { break }
+            }
+        }
+        if sentences.isEmpty {
+            return String(text.prefix(420))
+        }
+        return sentences.joined(separator: " ")
     }
 }
 
@@ -564,11 +653,14 @@ struct AlbumCard: View {
 
 struct ArtistRow: View {
     let artist: ArtistGroup
+    var showDivider = true
     @Environment(LibraryStore.self) private var library
 
     var body: some View {
         HStack(spacing: 16) {
-            ArtworkView(data: library.artistArtwork[artist.name] ?? artist.albums.first?.artworkData)
+            ArtworkView(data: library.artistArtwork[artist.name]
+                ?? library.artistArtworkData(for: artist.name)
+                ?? artist.albums.first?.artworkData)
                 .frame(width: 58, height: 58)
                 .clipShape(Circle())
             VStack(alignment: .leading, spacing: 4) {
@@ -585,7 +677,7 @@ struct ArtistRow: View {
         }
         .padding(.vertical, 10)
         .contentShape(Rectangle())
-        Divider()
+        if showDivider { Divider() }
     }
 }
 
@@ -940,50 +1032,62 @@ struct NowPlayingView: View {
 
 struct MiniPlayerView: View {
     @Environment(PlaybackEngine.self) private var playback
+    @Environment(LibraryStore.self) private var library
+    @Environment(BandcampStore.self) private var bandcamp
     let onOpen: () -> Void
 
     var body: some View {
         VStack(spacing: 10) {
-            HStack(spacing: 18) {
-                Button(action: onOpen) {
-                    HStack(spacing: 14) {
-                        ArtworkView(data: playback.currentTrack?.artworkData)
-                            .frame(width: 64, height: 64)
-                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(playback.currentTrack?.displayTitle ?? "Nothing playing")
-                                .font(.headline)
-                                .lineLimit(1)
-                            Text(playback.currentTrack?.displayArtist ?? "Choose a track from your library")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                            Text(playback.currentTrack?.displayAlbum ?? "")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                                .lineLimit(1)
+            ZStack {
+                HStack(spacing: 18) {
+                    Button(action: onOpen) {
+                        HStack(spacing: 14) {
+                            ArtworkView(data: playback.currentTrack?.artworkData)
+                                .frame(width: 64, height: 64)
+                                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(playback.currentTrack?.displayTitle ?? "Nothing playing")
+                                    .font(.headline)
+                                    .lineLimit(1)
+                                Text(playback.currentTrack?.displayArtist ?? "Choose a track from your library")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                Text(playback.currentTrack?.displayAlbum ?? "")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                            }
                         }
+                        .frame(maxWidth: 320, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer()
+
+                    HStack(spacing: 14) {
+                        Button(action: toggleCurrentTrackLike) {
+                            Image(systemName: isCurrentTrackLiked ? "heart.fill" : "heart")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(isCurrentTrackLiked ? .pink : .secondary)
+                                .frame(width: 34, height: 34)
+                                .background(.quaternary, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(playback.currentTrack == nil)
+                        .help(isCurrentTrackLiked ? "Unlike track" : "Like track")
+
+                        Button(action: onOpen) {
+                            Image(systemName: "rectangle.expand.vertical")
+                                .frame(width: 34, height: 34)
+                                .background(.quaternary, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open Now Playing")
                     }
                 }
-                .buttonStyle(.plain)
 
-                Spacer(minLength: 18)
-
-                HStack(spacing: 22) {
-                    Button { playback.previous() } label: { Image(systemName: "backward.fill") }
-                    Button { playback.toggle() } label: {
-                        Image(systemName: playback.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                            .font(.system(size: 32))
-                    }
-                    Button { playback.next() } label: { Image(systemName: "forward.fill") }
-                }
-                .buttonStyle(.plain)
-
-                Button(action: onOpen) {
-                    Image(systemName: "rectangle.expand.vertical")
-                }
-                .buttonStyle(.plain)
-                .help("Open Now Playing")
+                PlayerTransportControls()
             }
 
             HStack(spacing: 10) {
@@ -1016,6 +1120,53 @@ struct MiniPlayerView: View {
     private func formatTime(_ seconds: Double) -> String {
         guard seconds.isFinite else { return "0:00" }
         return String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60)
+    }
+
+    private var isCurrentTrackLiked: Bool {
+        guard let track = playback.currentTrack else { return false }
+        return track.id.hasPrefix("bandcamp-")
+            ? bandcamp.isSaved(track)
+            : library.isFavorite(track)
+    }
+
+    private func toggleCurrentTrackLike() {
+        guard let track = playback.currentTrack else { return }
+        if track.id.hasPrefix("bandcamp-") {
+            bandcamp.toggleSaved(track)
+        } else {
+            library.toggleFavorite(track)
+        }
+    }
+}
+
+struct PlayerTransportControls: View {
+    @Environment(PlaybackEngine.self) private var playback
+
+    var body: some View {
+        HStack(spacing: 12) {
+            transportButton("backward.fill", size: 36) { playback.previous() }
+            Button { playback.toggle() } label: {
+                Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 48, height: 48)
+                    .background(Color.accentColor.gradient, in: Circle())
+                    .shadow(color: Color.accentColor.opacity(0.3), radius: 8, y: 3)
+            }
+            .buttonStyle(.plain)
+            transportButton("forward.fill", size: 36) { playback.next() }
+        }
+        .disabled(playback.currentTrack == nil)
+    }
+
+    private func transportButton(_ image: String, size: CGFloat, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: image)
+                .font(.system(size: 13, weight: .semibold))
+                .frame(width: size, height: size)
+                .background(.quaternary, in: Circle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -1107,6 +1258,8 @@ struct ArtworkView: View {
 
 struct SettingsView: View {
     @Environment(LibraryStore.self) private var library
+    @Environment(PlaybackEngine.self) private var playback
+    @Environment(BandcampStore.self) private var bandcamp
 
     var body: some View {
         Form {
@@ -1130,6 +1283,72 @@ struct SettingsView: View {
                     Button("Add Folder…") { library.presentFolderImporter() }
                     Button("Rescan All") { library.scan() }
                 }
+            }
+            Section("Equalizer") {
+                Toggle("Enable equalizer", isOn: Binding(
+                    get: { playback.equalizerEnabled },
+                    set: { playback.equalizerEnabled = $0 }
+                ))
+                Picker("Preset", selection: Binding(
+                    get: { playback.equalizerPreset },
+                    set: { playback.applyEqualizerPreset($0) }
+                )) {
+                    ForEach(EqualizerPreset.allCases) { preset in
+                        Text(preset.title).tag(preset)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                    ForEach(Array(PlaybackEngine.equalizerFrequencies.enumerated()), id: \.offset) { index, frequency in
+                        HStack(spacing: 10) {
+                            Text(equalizerFrequencyLabel(frequency))
+                                .font(.caption.monospacedDigit())
+                                .frame(width: 48, alignment: .trailing)
+                            Slider(
+                                value: Binding(
+                                    get: { Double(playback.equalizerGains[index]) },
+                                    set: { playback.setEqualizerGain(Float($0), at: index) }
+                                ),
+                                in: -12...12,
+                                step: 0.5
+                            )
+                            Text(String(format: "%+.1f", playback.equalizerGains[index]))
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 40, alignment: .trailing)
+                        }
+                    }
+                }
+                .disabled(!playback.equalizerEnabled)
+                Text("Ten-band equalization is applied to local files and cached Bandcamp playback.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Cache") {
+                HStack {
+                    Label("Bandcamp audio", systemImage: "internaldrive")
+                    Spacer()
+                    Text(cacheSummary)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                HStack {
+                    Button("Clean Up Now") { bandcamp.cleanUpCache() }
+                        .disabled(bandcamp.isCleaningCache)
+                    if bandcamp.isCleaningCache {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+                if let message = bandcamp.cacheMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text("Bandcamp audio that has not been played for seven days is removed automatically. Cleanup runs when Uziq starts and once per day while it remains open.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section("Metadata") {
                 Text("Embedded tags and artwork are used first. Missing album covers are looked up from MusicBrainz and the Cover Art Archive in the background.")
@@ -1157,5 +1376,16 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .padding(24)
         .frame(maxWidth: 720)
+    }
+
+    private func equalizerFrequencyLabel(_ frequency: Float) -> String {
+        frequency >= 1_000
+            ? "\(Int(frequency / 1_000))k"
+            : "\(Int(frequency))"
+    }
+
+    private var cacheSummary: String {
+        let size = ByteCountFormatter.string(fromByteCount: bandcamp.cacheBytes, countStyle: .file)
+        return "\(size) · \(bandcamp.cachedFileCount) \(bandcamp.cachedFileCount == 1 ? "file" : "files")"
     }
 }

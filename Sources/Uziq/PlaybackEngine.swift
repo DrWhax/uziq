@@ -2,31 +2,96 @@ import AVFoundation
 import Foundation
 import Observation
 
+enum EqualizerPreset: String, CaseIterable, Identifiable {
+    case flat
+    case bassBoost
+    case trebleBoost
+    case vocal
+    case rock
+    case custom
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .flat: "Flat"
+        case .bassBoost: "Bass Boost"
+        case .trebleBoost: "Treble Boost"
+        case .vocal: "Vocal"
+        case .rock: "Rock"
+        case .custom: "Custom"
+        }
+    }
+
+    var gains: [Float]? {
+        switch self {
+        case .flat: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        case .bassBoost: [7, 6, 5, 3, 1, 0, 0, 0, 0, 0]
+        case .trebleBoost: [0, 0, 0, 0, 0, 1, 3, 5, 6, 7]
+        case .vocal: [-2, -1, 0, 2, 4, 5, 4, 2, 0, -1]
+        case .rock: [5, 4, 2, 0, -1, 1, 3, 4, 5, 4]
+        case .custom: nil
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class PlaybackEngine {
+    static let equalizerFrequencies: [Float] = [32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
+
     var currentTrack: Track?
     var isPlaying = false
     var currentTime = 0.0
     var duration = 0.0
     var volume: Float = 1.0 {
-        didSet { audioPlayer?.volume = volume }
+        didSet { playerNode.volume = volume }
     }
     var queue: [Track] = []
+    var equalizerEnabled: Bool {
+        didSet {
+            applyEqualizerSettings()
+            UserDefaults.standard.set(equalizerEnabled, forKey: "equalizer-enabled")
+        }
+    }
+    var equalizerGains: [Float]
+    var equalizerPreset: EqualizerPreset
+
     private var currentIndex = 0
 
-    @ObservationIgnored private var audioPlayer: AVAudioPlayer?
-    @ObservationIgnored private let delegate = LocalPlaybackDelegate()
+    @ObservationIgnored private let audioEngine = AVAudioEngine()
+    @ObservationIgnored private let playerNode = AVAudioPlayerNode()
+    @ObservationIgnored private let equalizer = AVAudioUnitEQ(numberOfBands: 10)
+    @ObservationIgnored private var audioFile: AVAudioFile?
+    @ObservationIgnored private var startingFrame: AVAudioFramePosition = 0
+    @ObservationIgnored private var totalFrames: AVAudioFramePosition = 0
+    @ObservationIgnored private var sampleRate = 44_100.0
+    @ObservationIgnored private var scheduleGeneration = 0
     @ObservationIgnored private var progressTimer: Timer?
     @ObservationIgnored private var toggleObserver: NSObjectProtocol?
+    @ObservationIgnored private var nextTrackProvider: (@MainActor () async -> Track?)?
+    @ObservationIgnored private var prefetchTask: Task<Void, Never>?
+    @ObservationIgnored private var isWaitingForNextTrack = false
 
     init() {
-        delegate.onFinished = { [weak self] in
-            Task { @MainActor in self?.advanceCurrentTrack() }
+        let defaults = UserDefaults.standard
+        equalizerEnabled = defaults.bool(forKey: "equalizer-enabled")
+        if let values = defaults.array(forKey: "equalizer-gains") as? [NSNumber], values.count == 10 {
+            equalizerGains = values.map(\.floatValue)
+        } else {
+            equalizerGains = EqualizerPreset.flat.gains!
         }
-        delegate.onDecodeError = { [weak self] in
-            Task { @MainActor in self?.advanceCurrentTrack() }
-        }
+        equalizerPreset = EqualizerPreset(rawValue: defaults.string(forKey: "equalizer-preset") ?? "") ?? .flat
+
+        audioEngine.attach(playerNode)
+        audioEngine.attach(equalizer)
+        audioEngine.connect(playerNode, to: equalizer, format: nil)
+        audioEngine.connect(equalizer, to: audioEngine.mainMixerNode, format: nil)
+        playerNode.volume = volume
+        configureEqualizerBands()
+        applyEqualizerSettings()
+        try? startAudioEngine()
+
         progressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.updateProgress() }
         }
@@ -41,11 +106,14 @@ final class PlaybackEngine {
 
     deinit {
         progressTimer?.invalidate()
+        prefetchTask?.cancel()
         if let toggleObserver { NotificationCenter.default.removeObserver(toggleObserver) }
-        audioPlayer?.stop()
+        playerNode.stop()
+        audioEngine.stop()
     }
 
     func play(_ track: Track, in tracks: [Track]? = nil) {
+        resetStreamingQueue()
         queue = tracks ?? [track]
         let requestedIndex = queue.firstIndex(of: track) ?? 0
         guard let firstAvailable = firstAvailableIndex(startingAt: requestedIndex) else {
@@ -55,31 +123,53 @@ final class PlaybackEngine {
         startTrack(at: firstAvailable)
     }
 
+    func playStreaming(
+        _ track: Track,
+        nextTrackProvider: @escaping @MainActor () async -> Track?
+    ) {
+        resetStreamingQueue()
+        queue = [track]
+        self.nextTrackProvider = nextTrackProvider
+        currentIndex = 0
+        startTrack(at: 0)
+    }
+
     func toggle() {
-        guard let audioPlayer else { return }
+        guard currentTrack != nil else { return }
         if isPlaying {
-            audioPlayer.pause()
+            playerNode.pause()
             isPlaying = false
-        } else if audioPlayer.play() {
-            isPlaying = true
+        } else {
+            try? startAudioEngine()
+            playerNode.play()
+            isPlaying = playerNode.isPlaying
         }
     }
 
     func pause() {
-        audioPlayer?.pause()
+        playerNode.pause()
         isPlaying = false
     }
 
     func seek(to seconds: Double) {
+        guard let audioFile else { return }
         let safeSeconds = seconds.isFinite ? max(0, seconds) : 0
         let value = min(safeSeconds, duration > 0 ? duration : safeSeconds)
-        audioPlayer?.currentTime = value
+        let frame = min(totalFrames, max(0, AVAudioFramePosition(value * sampleRate)))
+        let shouldResume = isPlaying
+        scheduleGeneration += 1
+        playerNode.stop()
+        schedule(audioFile, from: frame, shouldPlay: shouldResume)
         currentTime = value
     }
 
     func next() {
         guard let nextIndex = firstAvailableIndex(startingAt: currentIndex + 1) else {
-            stopPlayback()
+            if nextTrackProvider != nil {
+                waitForNextTrack()
+            } else {
+                stopPlayback()
+            }
             return
         }
         startTrack(at: nextIndex)
@@ -97,6 +187,22 @@ final class PlaybackEngine {
         startTrack(at: previousIndex)
     }
 
+    func setEqualizerGain(_ gain: Float, at index: Int) {
+        guard equalizerGains.indices.contains(index) else { return }
+        equalizerGains[index] = min(12, max(-12, gain))
+        equalizerPreset = .custom
+        applyEqualizerSettings()
+        persistEqualizer()
+    }
+
+    func applyEqualizerPreset(_ preset: EqualizerPreset) {
+        guard let gains = preset.gains else { return }
+        equalizerPreset = preset
+        equalizerGains = gains
+        applyEqualizerSettings()
+        persistEqualizer()
+    }
+
     private func startTrack(at index: Int) {
         guard index >= 0, index < queue.count, fileExists(queue[index]) else {
             guard let nextIndex = firstAvailableIndex(startingAt: index + 1) else {
@@ -108,44 +214,146 @@ final class PlaybackEngine {
         }
 
         do {
-            let player = try AVAudioPlayer(contentsOf: queue[index].url)
-            player.delegate = delegate
-            player.volume = volume
-            player.prepareToPlay()
-            audioPlayer?.stop()
-            audioPlayer = player
+            let file = try AVAudioFile(forReading: queue[index].url)
+            scheduleGeneration += 1
+            playerNode.stop()
+            try startAudioEngine()
+            audioFile = file
+            sampleRate = file.processingFormat.sampleRate
+            totalFrames = file.length
             currentIndex = index
             currentTrack = queue[index]
             currentTime = 0
-            duration = validDuration(player.duration)
-            isPlaying = player.play()
+            duration = sampleRate > 0 ? Double(totalFrames) / sampleRate : 0
+            schedule(file, from: 0, shouldPlay: true)
+            isPlaying = playerNode.isPlaying
             if isPlaying {
                 NotificationCenter.default.post(name: .uziqTrackPlayed, object: queue[index].id)
             }
         } catch {
-            // A file can disappear or become unreadable between the scan and
-            // playback. Treat decode failures like removed queue items.
             guard let nextIndex = firstAvailableIndex(startingAt: index + 1) else {
-                stopPlayback()
+                if nextTrackProvider != nil {
+                    waitForNextTrack()
+                } else {
+                    stopPlayback()
+                }
                 return
             }
             startTrack(at: nextIndex)
         }
     }
 
+    private func schedule(_ file: AVAudioFile, from frame: AVAudioFramePosition, shouldPlay: Bool) {
+        startingFrame = frame
+        let remaining = max(0, totalFrames - frame)
+        guard remaining > 0 else {
+            advanceCurrentTrack()
+            return
+        }
+        let generation = scheduleGeneration
+        let frameCount = AVAudioFrameCount(min(remaining, AVAudioFramePosition(UInt32.max)))
+        playerNode.scheduleSegment(
+            file,
+            startingFrame: frame,
+            frameCount: frameCount,
+            at: nil,
+            completionCallbackType: .dataPlayedBack
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.scheduleGeneration == generation else { return }
+                self.advanceCurrentTrack()
+            }
+        }
+        if shouldPlay {
+            playerNode.play()
+            isPlaying = playerNode.isPlaying
+        } else {
+            isPlaying = false
+        }
+    }
+
     private func advanceCurrentTrack() {
         guard let nextIndex = firstAvailableIndex(startingAt: currentIndex + 1) else {
-            stopPlayback()
+            if nextTrackProvider != nil {
+                waitForNextTrack()
+            } else {
+                stopPlayback()
+            }
             return
         }
         startTrack(at: nextIndex)
     }
 
     private func updateProgress() {
-        guard let audioPlayer else { return }
-        currentTime = audioPlayer.currentTime.isFinite ? max(0, audioPlayer.currentTime) : 0
-        duration = validDuration(audioPlayer.duration)
-        isPlaying = audioPlayer.isPlaying
+        guard currentTrack != nil else { return }
+        if let renderTime = playerNode.lastRenderTime,
+           let playerTime = playerNode.playerTime(forNodeTime: renderTime) {
+            let renderedFrame = max(0, playerTime.sampleTime)
+            let absoluteFrame = min(totalFrames, startingFrame + renderedFrame)
+            currentTime = sampleRate > 0 ? Double(absoluteFrame) / sampleRate : 0
+        }
+        isPlaying = playerNode.isPlaying
+        if duration > 0, duration - currentTime <= 20 {
+            prefetchNextTrackIfNeeded()
+        }
+    }
+
+    private func waitForNextTrack() {
+        scheduleGeneration += 1
+        playerNode.stop()
+        isPlaying = false
+        isWaitingForNextTrack = true
+        prefetchNextTrackIfNeeded()
+    }
+
+    private func prefetchNextTrackIfNeeded() {
+        guard currentIndex + 1 >= queue.count,
+              prefetchTask == nil,
+              let provider = nextTrackProvider else { return }
+
+        prefetchTask = Task { [weak self] in
+            let nextTrack = await provider()
+            guard let self, !Task.isCancelled else { return }
+            prefetchTask = nil
+            guard let nextTrack else {
+                nextTrackProvider = nil
+                if isWaitingForNextTrack { stopPlayback() }
+                return
+            }
+            queue.append(nextTrack)
+            if isWaitingForNextTrack {
+                isWaitingForNextTrack = false
+                startTrack(at: currentIndex + 1)
+            }
+        }
+    }
+
+    private func configureEqualizerBands() {
+        for (index, frequency) in Self.equalizerFrequencies.enumerated() {
+            let band = equalizer.bands[index]
+            band.filterType = .parametric
+            band.frequency = frequency
+            band.bandwidth = 1
+            band.bypass = false
+        }
+    }
+
+    private func applyEqualizerSettings() {
+        equalizer.bypass = !equalizerEnabled
+        for (index, gain) in equalizerGains.enumerated() where equalizer.bands.indices.contains(index) {
+            equalizer.bands[index].gain = gain
+        }
+    }
+
+    private func persistEqualizer() {
+        UserDefaults.standard.set(equalizerGains.map(Double.init), forKey: "equalizer-gains")
+        UserDefaults.standard.set(equalizerPreset.rawValue, forKey: "equalizer-preset")
+    }
+
+    private func startAudioEngine() throws {
+        guard !audioEngine.isRunning else { return }
+        audioEngine.prepare()
+        try audioEngine.start()
     }
 
     private func firstAvailableIndex(startingAt index: Int) -> Int? {
@@ -162,29 +370,21 @@ final class PlaybackEngine {
         FileManager.default.fileExists(atPath: track.url.path)
     }
 
-    private func validDuration(_ value: TimeInterval) -> Double {
-        value.isFinite && value >= 0 ? value : 0
-    }
-
     private func stopPlayback() {
-        audioPlayer?.stop()
-        audioPlayer = nil
+        resetStreamingQueue()
+        scheduleGeneration += 1
+        playerNode.stop()
+        audioFile = nil
         currentTrack = nil
         currentTime = 0
         duration = 0
         isPlaying = false
     }
-}
 
-private final class LocalPlaybackDelegate: NSObject, AVAudioPlayerDelegate {
-    var onFinished: (() -> Void)?
-    var onDecodeError: (() -> Void)?
-
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        onFinished?()
-    }
-
-    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
-        onDecodeError?()
+    private func resetStreamingQueue() {
+        prefetchTask?.cancel()
+        prefetchTask = nil
+        nextTrackProvider = nil
+        isWaitingForNextTrack = false
     }
 }

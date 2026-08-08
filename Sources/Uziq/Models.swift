@@ -8,6 +8,7 @@ enum LibrarySection: String, CaseIterable, Identifiable {
     case playlists
     case mostPlayed
     case recentlyAdded
+    case bandcamp
     case settings
 
     var id: String { rawValue }
@@ -21,6 +22,7 @@ enum LibrarySection: String, CaseIterable, Identifiable {
         case .playlists: "Playlists"
         case .mostPlayed: "Most Played"
         case .recentlyAdded: "Recently Added"
+        case .bandcamp: "Bandcamp"
         case .settings: "Settings"
         }
     }
@@ -34,6 +36,7 @@ enum LibrarySection: String, CaseIterable, Identifiable {
         case .playlists: "rectangle.stack"
         case .mostPlayed: "chart.bar.fill"
         case .recentlyAdded: "clock"
+        case .bandcamp: "dot.radiowaves.left.and.right"
         case .settings: "gearshape"
         }
     }
@@ -260,6 +263,64 @@ struct ArtistArtworkProgress: Sendable {
         guard total > 0 else { return nil }
         return min(1, max(0, Double(completed) / Double(total)))
     }
+}
+
+enum ArtistProfileSource: String, Sendable {
+    case lastFM
+    case bandcamp
+
+    var title: String {
+        switch self {
+        case .lastFM: "Last.fm"
+        case .bandcamp: "Bandcamp"
+        }
+    }
+}
+
+struct ArtistProfile: Hashable, Sendable {
+    let summary: String
+    let source: ArtistProfileSource
+}
+
+enum BandcampSubscriptionKind: String, Codable, CaseIterable, Identifiable, Sendable {
+    case keyword
+    case artist
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .keyword: "Keyword"
+        case .artist: "Artist"
+        }
+    }
+}
+
+struct BandcampSubscription: Identifiable, Codable, Hashable, Sendable {
+    let id: UUID
+    let kind: BandcampSubscriptionKind
+    let value: String
+}
+
+struct BandcampTrackDetails: Identifiable, Hashable, Sendable {
+    let id: Int
+    let number: Int?
+    let title: String
+    let duration: Double
+    let isStreamable: Bool
+    let pageURL: URL?
+    let lyrics: String?
+    let streamURL: URL?
+}
+
+struct BandcampAlbumDetails: Identifiable, Hashable, Sendable {
+    let id: Int
+    let bandID: Int
+    let type: String
+    let title: String
+    let artist: String
+    let artworkURL: URL?
+    let tracks: [BandcampTrackDetails]
 }
 
 enum UziqError: LocalizedError {
