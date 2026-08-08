@@ -45,6 +45,8 @@ final class SpotifyStore {
     @ObservationIgnored private var codeVerifier: String?
     @ObservationIgnored private var authorizationState: String?
     @ObservationIgnored private var playbackTimer: Timer?
+    @ObservationIgnored private var desiredVolume: Float = 1
+    @ObservationIgnored private var playbackGeneration = UUID()
     @ObservationIgnored private var playbackTick = 0
     @ObservationIgnored private var isSpotifyPlaybackSuppressed = false
     @ObservationIgnored private var uziqDeviceID: String?
@@ -82,6 +84,9 @@ final class SpotifyStore {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 let shouldPauseSpotify = self.isUziqPlaybackActive
+                self.playbackGeneration = UUID()
+                self.isStartingPlayback = false
+                self.playbackMessage = nil
                 self.isSpotifyPlaybackSuppressed = true
                 self.playback = nil
                 if shouldPauseSpotify { self.pause() }
@@ -364,7 +369,9 @@ final class SpotifyStore {
             ? "Connecting to the Uziq Spotify device…"
             : "Starting the Uziq Spotify device…"
         error = nil
-        play(request, attemptsRemaining: 20)
+        let generation = UUID()
+        playbackGeneration = generation
+        play(request, attemptsRemaining: 20, generation: generation)
     }
 
     func togglePlayback() {
@@ -392,6 +399,15 @@ final class SpotifyStore {
         performPlayerCommand(
             api.seekToPosition(max(0, Int(seconds * 1_000)), deviceId: uziqDeviceID)
         )
+    }
+
+    func setVolume(_ normalizedVolume: Float) {
+        desiredVolume = min(1, max(0, normalizedVolume))
+        guard isAuthorized, isUziqPlaybackActive else { return }
+        api.setVolume(to: Int((desiredVolume * 100).rounded()), deviceId: uziqDeviceID)
+            .receive(on: DispatchQueue.main)
+            .sink { _ in } receiveValue: { }
+            .store(in: &cancellables)
     }
 
     func refreshPlayback() {
@@ -524,7 +540,7 @@ final class SpotifyStore {
         startPlayback(PlaybackRequest(context: .uris(uris), offset: nil))
     }
 
-    private func play(_ request: PlaybackRequest, attemptsRemaining: Int) {
+    private func play(_ request: PlaybackRequest, attemptsRemaining: Int, generation: UUID) {
         api.availableDevices()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] completion in
@@ -535,6 +551,7 @@ final class SpotifyStore {
                 }
             } receiveValue: { [weak self] devices in
                 guard let self else { return }
+                guard playbackGeneration == generation else { return }
                 availableDeviceNames = devices.map(\.name)
                 if let device = devices.first(where: {
                     $0.name.caseInsensitiveCompare("Uziq") == .orderedSame && !$0.isRestricted
@@ -545,19 +562,25 @@ final class SpotifyStore {
                         .receive(on: DispatchQueue.main)
                         .sink { [weak self] completion in
                             guard let self else { return }
+                            guard playbackGeneration == generation else { return }
                             isStartingPlayback = false
                             playbackMessage = nil
                             if case .failure(let error) = completion {
                                 self.error = "Spotify could not start playback: \(error.localizedDescription)"
                             }
                         } receiveValue: { [weak self] in
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self?.refreshPlayback() }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                                guard let self else { return }
+                                self.refreshPlayback()
+                                self.setVolume(self.desiredVolume)
+                            }
                         }
                         .store(in: &cancellables)
                 } else if attemptsRemaining > 0, librespot.status.isRunning {
                     playbackMessage = "Waiting for Spotify to discover the Uziq device…"
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-                        self?.play(request, attemptsRemaining: attemptsRemaining - 1)
+                        guard self?.playbackGeneration == generation else { return }
+                        self?.play(request, attemptsRemaining: attemptsRemaining - 1, generation: generation)
                     }
                 } else {
                     isStartingPlayback = false

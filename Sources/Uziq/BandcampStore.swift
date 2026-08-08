@@ -26,6 +26,8 @@ final class BandcampStore {
     @ObservationIgnored private let savedResultsKey = "bandcamp-saved-results"
     @ObservationIgnored private var playObserver: NSObjectProtocol?
     @ObservationIgnored private var cacheMaintenanceTimer: Timer?
+    @ObservationIgnored private var playbackTask: Task<Void, Never>?
+    @ObservationIgnored private var playbackGeneration = UUID()
 
     init() {
         if let data = defaults.data(forKey: subscriptionsKey),
@@ -128,13 +130,25 @@ final class BandcampStore {
         }
     }
 
-    func play(_ result: BandcampResult, using playback: PlaybackEngine) {
-        guard result.isPlayable, preparingPlaybackResultID == nil else { return }
+    func play(
+        _ result: BandcampResult,
+        using playback: PlaybackEngine,
+        onFailure: ((String) -> Void)? = nil
+    ) {
+        guard result.isPlayable else { return }
+        cancelPendingPlayback()
+        let generation = UUID()
+        playbackGeneration = generation
         let client = self.client
         preparingPlaybackResultID = result.id
         error = nil
-        Task { [weak self] in
-            defer { self?.preparingPlaybackResultID = nil }
+        playbackTask = Task { [weak self] in
+            defer {
+                if self?.playbackGeneration == generation {
+                    self?.preparingPlaybackResultID = nil
+                    self?.playbackTask = nil
+                }
+            }
             do {
                 guard let store = self else { return }
                 let details = try await client.details(for: result)
@@ -193,8 +207,16 @@ final class BandcampStore {
                 }
             } catch {
                 self?.error = error.localizedDescription
+                onFailure?(error.localizedDescription)
             }
         }
+    }
+
+    func cancelPendingPlayback() {
+        playbackGeneration = UUID()
+        playbackTask?.cancel()
+        playbackTask = nil
+        preparingPlaybackResultID = nil
     }
 
     func isSaved(_ result: BandcampResult) -> Bool {

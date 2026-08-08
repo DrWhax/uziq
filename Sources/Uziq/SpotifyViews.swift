@@ -88,6 +88,7 @@ struct SpotifyLibraryView: View {
 
 private struct SpotifyBrowseView: View {
     @Environment(SpotifyStore.self) private var spotify
+    @Environment(PlaybackQueueStore.self) private var queue
 
     var body: some View {
         @Bindable var spotify = spotify
@@ -159,7 +160,7 @@ private struct SpotifyBrowseView: View {
                             HStack(spacing: 16) {
                                 ForEach(spotify.topArtists) { artist in
                                     SpotifyArtistRadioTile(item: artist) {
-                                        spotify.play(artist)
+                                        queue.replace(with: artist)
                                     }
                                 }
                             }
@@ -194,6 +195,7 @@ private struct SpotifyBrowseView: View {
 
 private struct SpotifyResultSection: View {
     @Environment(SpotifyStore.self) private var spotify
+    @Environment(PlaybackQueueStore.self) private var queue
     let title: String
     let items: [SpotifyCatalogItem]
     var opensPlaylists = false
@@ -208,7 +210,7 @@ private struct SpotifyResultSection: View {
                         if opensPlaylists {
                             spotify.openPlaylist(item)
                         } else {
-                            spotify.play(item)
+                            queue.replace(with: item)
                         }
                     }
                     Divider()
@@ -268,6 +270,7 @@ private struct SpotifyArtistRadioTile: View {
 
 private struct SpotifyResultRow: View {
     @Environment(SpotifyStore.self) private var spotify
+    @Environment(PlaybackQueueStore.self) private var queue
     let item: SpotifyCatalogItem
     let primaryAction: () -> Void
 
@@ -298,7 +301,7 @@ private struct SpotifyResultRow: View {
             }
             Button {
                 if item.kind == .playlist {
-                    spotify.play(item)
+                    queue.replace(with: item)
                 } else {
                     primaryAction()
                 }
@@ -317,11 +320,18 @@ private struct SpotifyResultRow: View {
             .buttonStyle(.bordered)
         }
         .padding(.vertical, 8)
+        .contextMenu {
+            if !item.uri.isEmpty {
+                Button("Play Next") { queue.playNext(item) }
+                Button("Add to Queue") { queue.add(item) }
+            }
+        }
     }
 }
 
 private struct SpotifyPlaylistDetail: View {
     @Environment(SpotifyStore.self) private var spotify
+    @Environment(PlaybackQueueStore.self) private var queue
     let playlist: SpotifyCatalogItem
 
     var body: some View {
@@ -346,7 +356,13 @@ private struct SpotifyPlaylistDetail: View {
                             .font(.system(size: 28, weight: .bold, design: .rounded))
                         Text(playlist.subtitle)
                             .foregroundStyle(.secondary)
-                        Button { spotify.playCollection(playlist) } label: {
+                        Button {
+                            if let first = spotify.playlistTracks.first {
+                                queue.replace(with: first, context: spotify.playlistTracks)
+                            } else {
+                                queue.replace(with: playlist)
+                            }
+                        } label: {
                             Label("Play Playlist", systemImage: "play.fill")
                         }
                         .buttonStyle(.borderedProminent)
@@ -363,7 +379,9 @@ private struct SpotifyPlaylistDetail: View {
                 } else {
                     LazyVStack(spacing: 0) {
                         ForEach(spotify.playlistTracks) { track in
-                            SpotifyResultRow(item: track) { spotify.play(track, in: playlist) }
+                            SpotifyResultRow(item: track) {
+                                queue.replace(with: track, context: spotify.playlistTracks)
+                            }
                             Divider()
                         }
                     }

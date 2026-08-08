@@ -3,7 +3,7 @@ import SwiftUI
 
 struct BandcampLibraryView: View {
     @Environment(BandcampStore.self) private var bandcamp
-    @Environment(PlaybackEngine.self) private var playback
+    @Environment(PlaybackQueueStore.self) private var queue
     @State private var showingSetup = false
     @State private var showingSavedOnly = false
 
@@ -103,7 +103,7 @@ struct BandcampLibraryView: View {
                                 isPlayDisabled: bandcamp.preparingPlaybackResultID != nil,
                                 onToggleSaved: { bandcamp.toggleSaved(result) }
                             ) {
-                                bandcamp.play(result, using: playback)
+                                queue.replace(with: result)
                             } onOpen: {
                                 NSWorkspace.shared.open(result.openURL)
                             }
@@ -165,6 +165,7 @@ struct BandcampWelcomeView: View {
 }
 
 struct BandcampResultRow: View {
+    @Environment(PlaybackQueueStore.self) private var queue
     let result: BandcampResult
     let isSaved: Bool
     let isPlayDisabled: Bool
@@ -225,6 +226,8 @@ struct BandcampResultRow: View {
             Button("Open in Browser", action: onOpen)
             if result.isPlayable {
                 Button("Play", action: onPlay)
+                Button("Play Next") { queue.playNext(result) }
+                Button("Add to Queue") { queue.add(result) }
             }
         }
     }

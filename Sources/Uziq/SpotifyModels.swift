@@ -16,7 +16,7 @@ enum SearchProvider: String, CaseIterable, Identifiable {
     }
 }
 
-enum SpotifyItemKind: String, Sendable {
+enum SpotifyItemKind: String, Codable, Sendable {
     case track
     case album
     case artist
@@ -34,7 +34,7 @@ enum SpotifyItemKind: String, Sendable {
     }
 }
 
-struct SpotifyCatalogItem: Identifiable, Hashable, Sendable {
+struct SpotifyCatalogItem: Identifiable, Codable, Hashable, Sendable {
     let id: String
     let name: String
     let subtitle: String

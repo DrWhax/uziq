@@ -147,10 +147,30 @@ final class PlaybackEngine {
         queue = tracks ?? [track]
         let requestedIndex = queue.firstIndex(of: track) ?? 0
         guard let firstAvailable = firstAvailableIndex(startingAt: requestedIndex) else {
-            stopPlayback()
+            stopPlayback(notifyCompletion: true)
             return
         }
         startTrack(at: firstAvailable)
+    }
+
+    func restore(_ track: Track, at seconds: Double) {
+        guard fileExists(track), let file = try? AVAudioFile(forReading: track.url) else { return }
+        if isSpotifyPCMActive { endSpotifyPCMStream() }
+        NotificationCenter.default.post(name: .uziqLocalPlaybackStarted, object: nil)
+        resetStreamingQueue()
+        queue = [track]
+        currentIndex = 0
+        scheduleGeneration += 1
+        playerNode.stop()
+        audioFile = file
+        sampleRate = file.processingFormat.sampleRate
+        totalFrames = file.length
+        currentTrack = track
+        duration = sampleRate > 0 ? Double(totalFrames) / sampleRate : 0
+        let restoredSeconds = min(max(0, seconds.isFinite ? seconds : 0), duration)
+        let frame = min(totalFrames, AVAudioFramePosition(restoredSeconds * sampleRate))
+        currentTime = restoredSeconds
+        schedule(file, from: frame, shouldPlay: false)
     }
 
     func playStreaming(
@@ -188,6 +208,10 @@ final class PlaybackEngine {
         isPlaying = false
     }
 
+    func stop() {
+        stopPlayback()
+    }
+
     func seek(to seconds: Double) {
         guard let audioFile, !isSpotifyPCMActive else { return }
         let safeSeconds = seconds.isFinite ? max(0, seconds) : 0
@@ -205,7 +229,7 @@ final class PlaybackEngine {
             if nextTrackProvider != nil {
                 waitForNextTrack()
             } else {
-                stopPlayback()
+                stopPlayback(notifyCompletion: true)
             }
             return
         }
@@ -378,7 +402,7 @@ final class PlaybackEngine {
         isSpotifyPCMActive = false
         guard index >= 0, index < queue.count, fileExists(queue[index]) else {
             guard let nextIndex = firstAvailableIndex(startingAt: index + 1) else {
-                stopPlayback()
+                stopPlayback(notifyCompletion: true)
                 return
             }
             startTrack(at: nextIndex)
@@ -407,7 +431,7 @@ final class PlaybackEngine {
                 if nextTrackProvider != nil {
                     waitForNextTrack()
                 } else {
-                    stopPlayback()
+                    stopPlayback(notifyCompletion: true)
                 }
                 return
             }
@@ -449,7 +473,7 @@ final class PlaybackEngine {
             if nextTrackProvider != nil {
                 waitForNextTrack()
             } else {
-                stopPlayback()
+                stopPlayback(notifyCompletion: true)
             }
             return
         }
@@ -489,7 +513,7 @@ final class PlaybackEngine {
             prefetchTask = nil
             guard let nextTrack else {
                 nextTrackProvider = nil
-                if isWaitingForNextTrack { stopPlayback() }
+                if isWaitingForNextTrack { stopPlayback(notifyCompletion: true) }
                 return
             }
             queue.append(nextTrack)
@@ -542,7 +566,7 @@ final class PlaybackEngine {
         FileManager.default.fileExists(atPath: track.url.path)
     }
 
-    private func stopPlayback() {
+    private func stopPlayback(notifyCompletion: Bool = false) {
         resetStreamingQueue()
         scheduleGeneration += 1
         playerNode.stop()
@@ -551,6 +575,9 @@ final class PlaybackEngine {
         currentTime = 0
         duration = 0
         isPlaying = false
+        if notifyCompletion {
+            NotificationCenter.default.post(name: .uziqPlaybackItemFinished, object: nil)
+        }
     }
 
     private func resetStreamingQueue() {

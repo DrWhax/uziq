@@ -12,6 +12,25 @@ swift run
 
 The app targets macOS 15 or newer.
 
+To build a normal, ad-hoc-signed macOS application using `Images/logo.png` as its icon:
+
+```sh
+./Scripts/build-app.sh
+open dist/Uziq.app
+```
+
+The application bundle is written to `dist/Uziq.app`. A Developer ID signature and notarization can be added later for public distribution.
+
+## Playback controls
+
+- `Space` or `F8`: play/pause
+- `⌘←` / `⌘→`: previous/next queue item
+- `⇧⌘P`: open Now Playing and the universal queue
+- `⌥⌘S`: toggle shuffle
+- `⌥⌘R`: cycle repeat off/all/one
+
+Use a track or result's context menu to choose **Play Next** or **Add to Queue**. The queue, selected item, playback position, shuffle/repeat mode, and volume are restored between launches.
+
 ## Current foundation
 
 - SwiftUI + Observation UI architecture
@@ -20,6 +39,7 @@ The app targets macOS 15 or newer.
 - SQLite library and full-text search
 - Embedded metadata, artwork, and lyrics extraction
 - AVAudioEngine playback with queue controls, waveform seeking, and equalization
+- Persistent universal queue with Play Next, reordering, shuffle, repeat, and session restoration
 - Bandcamp search, subscriptions, streaming, favorites, and expiring audio cache
 - Spotify PKCE login, personal library, catalog search, and playback through librespot's native CoreAudio output
 - Local / Bandcamp / Spotify global-search scopes
