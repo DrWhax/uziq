@@ -23,6 +23,8 @@ struct SpotifyLibraryView: View {
                         detail: "Sign in with PKCE to load your playlists and search Spotify's catalog. Your client secret is not needed.",
                         buttonTitle: "Connect Account"
                     ) { spotify.logIn() }
+                } else if let selectedArtist = spotify.selectedArtist {
+                    SpotifyArtistDetail(artist: selectedArtist)
                 } else if let selectedPlaylist = spotify.selectedPlaylist {
                     SpotifyPlaylistDetail(playlist: selectedPlaylist)
                 } else {
@@ -32,7 +34,7 @@ struct SpotifyLibraryView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .overlay(alignment: .topTrailing) {
-            if spotify.isLoading {
+            if spotify.isLoading || spotify.isLoadingArtist {
                 ProgressView()
                     .controlSize(.small)
                     .padding(.top, 34)
@@ -55,8 +57,8 @@ struct SpotifyLibraryView: View {
             }
             Spacer()
             if spotify.isAuthorized {
-                if spotify.selectedPlaylist != nil {
-                    Button { spotify.closePlaylist() } label: {
+                if spotify.selectedPlaylist != nil || spotify.selectedArtist != nil {
+                    Button { spotify.closeDetail() } label: {
                         Label("Spotify Home", systemImage: "house.fill")
                     }
                     .buttonStyle(.bordered)
@@ -160,7 +162,7 @@ private struct SpotifyBrowseView: View {
                             HStack(spacing: 16) {
                                 ForEach(spotify.topArtists) { artist in
                                     SpotifyArtistRadioTile(item: artist) {
-                                        queue.replace(with: artist)
+                                        spotify.openArtist(artist)
                                     }
                                 }
                             }
@@ -209,6 +211,8 @@ private struct SpotifyResultSection: View {
                     SpotifyResultRow(item: item) {
                         if opensPlaylists {
                             spotify.openPlaylist(item)
+                        } else if item.kind == .artist {
+                            spotify.openArtist(item)
                         } else {
                             queue.replace(with: item)
                         }
@@ -258,7 +262,7 @@ private struct SpotifyArtistRadioTile: View {
                 Text(item.name)
                     .font(.headline)
                     .lineLimit(1)
-                Label("Play radio", systemImage: "dot.radiowaves.left.and.right")
+                Label("View artist", systemImage: "chevron.right.circle")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -295,12 +299,12 @@ private struct SpotifyResultRow: View {
                 .foregroundStyle(.tertiary)
             }
             Spacer()
-            if item.kind == .playlist {
+            if item.kind == .playlist || item.kind == .artist {
                 Button("View", action: primaryAction)
                     .buttonStyle(.bordered)
             }
             Button {
-                if item.kind == .playlist {
+                if item.kind == .playlist || item.kind == .artist {
                     queue.replace(with: item)
                 } else {
                     primaryAction()
@@ -325,6 +329,178 @@ private struct SpotifyResultRow: View {
                 Button("Play Next") { queue.playNext(item) }
                 Button("Add to Queue") { queue.add(item) }
             }
+        }
+    }
+}
+
+private struct SpotifyArtistDetail: View {
+    @Environment(SpotifyStore.self) private var spotify
+    @Environment(PlaybackQueueStore.self) private var queue
+    let artist: SpotifyCatalogItem
+    @State private var section: SpotifyArtistPageSection = .albums
+
+    private let albumColumns = [
+        GridItem(.adaptive(minimum: 150, maximum: 210), spacing: 18)
+    ]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                SpotifyPlaybackNotice()
+
+                HStack(spacing: 24) {
+                    SpotifyRemoteArtwork(url: artist.artworkURL, systemImage: "person.fill")
+                        .frame(width: 180, height: 180)
+                        .clipShape(Circle())
+                        .shadow(color: .black.opacity(0.2), radius: 14, y: 7)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Button { spotify.closeArtist() } label: {
+                            Label("Back to Spotify", systemImage: "chevron.left")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        Text("Artist")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(artist.name)
+                            .font(.system(size: 38, weight: .bold, design: .rounded))
+                        if !artist.subtitle.isEmpty {
+                            Text(artist.subtitle)
+                                .foregroundStyle(.secondary)
+                        }
+                        HStack {
+                            Button(action: playRadio) {
+                                Label("Play Artist Radio", systemImage: "dot.radiowaves.left.and.right")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            Button {
+                                queue.playNext(artist)
+                            } label: {
+                                Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                }
+
+                Picker("Artist page", selection: $section) {
+                    ForEach(SpotifyArtistPageSection.allCases) { section in
+                        Text(section.title).tag(section)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 360)
+
+                if spotify.isLoadingArtist && spotify.artistAlbums.isEmpty && spotify.artistTopTracks.isEmpty {
+                    ProgressView("Loading \(artist.name)…")
+                        .frame(maxWidth: .infinity, minHeight: 180)
+                } else if section == .albums {
+                    albums
+                } else {
+                    radio
+                }
+            }
+            .padding(.horizontal, 28)
+            .padding(.bottom, 32)
+        }
+    }
+
+    @ViewBuilder private var albums: some View {
+        if spotify.artistAlbums.isEmpty {
+            ContentUnavailableView(
+                "No releases found",
+                systemImage: "square.stack.3d.up.slash",
+                description: Text("Spotify did not return albums or singles for this artist.")
+            )
+            .frame(maxWidth: .infinity, minHeight: 220)
+        } else {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Albums & Singles")
+                    .font(.title2.weight(.bold))
+                LazyVGrid(columns: albumColumns, alignment: .leading, spacing: 20) {
+                    ForEach(spotify.artistAlbums) { album in
+                        SpotifyArtistAlbumTile(album: album)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var radio: some View {
+        if spotify.artistTopTracks.isEmpty {
+            ContentUnavailableView(
+                "Radio is still available",
+                systemImage: "dot.radiowaves.left.and.right",
+                description: Text("Spotify did not expose top tracks here, but it can still start the artist context.")
+            )
+            .frame(maxWidth: .infinity, minHeight: 180)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Artist Radio")
+                            .font(.title2.weight(.bold))
+                        Text("Built from \(artist.name)’s current top tracks.")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(action: playRadio) {
+                        Label("Play Radio", systemImage: "play.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                LazyVStack(spacing: 0) {
+                    ForEach(spotify.artistTopTracks) { track in
+                        SpotifyResultRow(item: track) {
+                            queue.replace(with: track, context: spotify.artistTopTracks)
+                        }
+                        Divider()
+                    }
+                }
+            }
+        }
+    }
+
+    private func playRadio() {
+        if let first = spotify.artistTopTracks.first {
+            queue.replace(with: first, context: spotify.artistTopTracks)
+        } else {
+            queue.replace(with: artist)
+        }
+    }
+}
+
+private struct SpotifyArtistAlbumTile: View {
+    @Environment(PlaybackQueueStore.self) private var queue
+    let album: SpotifyCatalogItem
+
+    var body: some View {
+        Button { queue.replace(with: album) } label: {
+            VStack(alignment: .leading, spacing: 9) {
+                ZStack(alignment: .bottomTrailing) {
+                    SpotifyRemoteArtwork(url: album.artworkURL, systemImage: "square.stack")
+                        .aspectRatio(1, contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    Image(systemName: "play.fill")
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(Color.accentColor, in: Circle())
+                        .padding(8)
+                }
+                Text(album.name)
+                    .font(.headline)
+                    .lineLimit(2)
+                Text(album.itemCount.map { "\($0) tracks" } ?? album.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Play Next") { queue.playNext(album) }
+            Button("Add to Queue") { queue.add(album) }
         }
     }
 }

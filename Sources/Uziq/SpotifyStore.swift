@@ -31,6 +31,10 @@ final class SpotifyStore {
     private(set) var searchPlaylists: [SpotifyCatalogItem] = []
     private(set) var selectedPlaylist: SpotifyCatalogItem?
     private(set) var playlistTracks: [SpotifyCatalogItem] = []
+    private(set) var selectedArtist: SpotifyCatalogItem?
+    private(set) var artistAlbums: [SpotifyCatalogItem] = []
+    private(set) var artistTopTracks: [SpotifyCatalogItem] = []
+    private(set) var isLoadingArtist = false
     private(set) var playback: SpotifyPlaybackSnapshot?
     private(set) var isLoading = false
     private(set) var isStartingPlayback = false
@@ -47,6 +51,9 @@ final class SpotifyStore {
     @ObservationIgnored private var playbackTimer: Timer?
     @ObservationIgnored private var desiredVolume: Float = 1
     @ObservationIgnored private var playbackGeneration = UUID()
+    @ObservationIgnored private var artistLoadGeneration = UUID()
+    @ObservationIgnored private var artistTopTracksFinished = false
+    @ObservationIgnored private var artistAlbumsFinished = false
     @ObservationIgnored private var playbackTick = 0
     @ObservationIgnored private var isSpotifyPlaybackSuppressed = false
     @ObservationIgnored private var uziqDeviceID: String?
@@ -266,6 +273,7 @@ final class SpotifyStore {
     }
 
     func openPlaylist(_ playlist: SpotifyCatalogItem) {
+        closeArtist()
         selectedPlaylist = playlist
         playlistTracks = []
         guard isAuthorized else { return }
@@ -286,6 +294,7 @@ final class SpotifyStore {
     }
 
     func openLikedSongs() {
+        closeArtist()
         selectedPlaylist = likedSongsCollection
         playlistTracks = likedSongs
     }
@@ -293,6 +302,46 @@ final class SpotifyStore {
     func closePlaylist() {
         selectedPlaylist = nil
         playlistTracks = []
+    }
+
+    func openArtist(_ artist: SpotifyCatalogItem) {
+        guard artist.kind == .artist, !artist.uri.isEmpty else { return }
+        closePlaylist()
+        selectedArtist = artist
+        artistAlbums = []
+        artistTopTracks = []
+        error = nil
+        isLoadingArtist = true
+        artistTopTracksFinished = false
+        artistAlbumsFinished = false
+        let generation = UUID()
+        artistLoadGeneration = generation
+        loadArtistAlbums(artist, offset: 0, accumulated: [], generation: generation)
+        api.artistTopTracks(artist.uri, country: "from_token")
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] completion in
+                guard let self, artistLoadGeneration == generation else { return }
+                artistTopTracksFinished = true
+                finishArtistLoadingIfReady()
+                if case .failure(let error) = completion { self.error = error.localizedDescription }
+            } receiveValue: { [weak self] tracks in
+                guard let self, artistLoadGeneration == generation else { return }
+                artistTopTracks = tracks.map(Self.catalogItem)
+            }
+            .store(in: &cancellables)
+    }
+
+    func closeArtist() {
+        artistLoadGeneration = UUID()
+        selectedArtist = nil
+        artistAlbums = []
+        artistTopTracks = []
+        isLoadingArtist = false
+    }
+
+    func closeDetail() {
+        closePlaylist()
+        closeArtist()
     }
 
     func playCollection(_ collection: SpotifyCatalogItem) {
@@ -504,6 +553,53 @@ final class SpotifyStore {
                 self?.topArtists = page.items.map(Self.catalogItem)
             }
             .store(in: &cancellables)
+    }
+
+    private func loadArtistAlbums(
+        _ artist: SpotifyCatalogItem,
+        offset: Int,
+        accumulated: [SpotifyCatalogItem],
+        generation: UUID
+    ) {
+        api.artistAlbums(
+            artist.uri,
+            groups: [.album, .single],
+            country: "from_token",
+            limit: 50,
+            offset: offset
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] completion in
+            guard let self, artistLoadGeneration == generation else { return }
+            if case .failure(let error) = completion {
+                artistAlbumsFinished = true
+                finishArtistLoadingIfReady()
+                self.error = error.localizedDescription
+            }
+        } receiveValue: { [weak self] page in
+            guard let self, artistLoadGeneration == generation else { return }
+            let combined = accumulated + page.items.map(Self.catalogItem)
+            if !page.items.isEmpty, combined.count < page.total {
+                loadArtistAlbums(
+                    artist,
+                    offset: offset + page.items.count,
+                    accumulated: combined,
+                    generation: generation
+                )
+            } else {
+                var seen = Set<String>()
+                artistAlbums = combined.filter { seen.insert($0.id).inserted }
+                artistAlbumsFinished = true
+                finishArtistLoadingIfReady()
+            }
+        }
+        .store(in: &cancellables)
+    }
+
+    private func finishArtistLoadingIfReady() {
+        if artistAlbumsFinished && artistTopTracksFinished {
+            isLoadingArtist = false
+        }
     }
 
     private func loadSavedTracks(offset: Int, accumulated: [SpotifyCatalogItem]) {

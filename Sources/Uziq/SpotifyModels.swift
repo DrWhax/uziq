@@ -34,6 +34,14 @@ enum SpotifyItemKind: String, Codable, Sendable {
     }
 }
 
+enum SpotifyArtistPageSection: String, CaseIterable, Identifiable {
+    case albums
+    case radio
+
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+}
+
 struct SpotifyCatalogItem: Identifiable, Codable, Hashable, Sendable {
     let id: String
     let name: String
