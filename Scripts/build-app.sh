@@ -20,6 +20,15 @@ mkdir -p "$contents_dir/MacOS" "$contents_dir/Resources" "$helpers_dir" "$notice
 cp "$binary_dir/Uziq" "$contents_dir/MacOS/Uziq"
 cp "$project_dir/Packaging/Info.plist" "$contents_dir/Info.plist"
 
+spotify_client_id=${UZIQ_SPOTIFY_CLIENT_ID:-}
+if [[ -n "$spotify_client_id" ]]; then
+    if [[ ! "$spotify_client_id" =~ ^[A-Za-z0-9]+$ ]]; then
+        echo "UZIQ_SPOTIFY_CLIENT_ID must contain only letters and numbers." >&2
+        exit 1
+    fi
+    /usr/libexec/PlistBuddy -c "Add :UziqSpotifyClientID string $spotify_client_id" "$contents_dir/Info.plist"
+fi
+
 librespot_source=${UZIQ_LIBRESPOT_PATH:-}
 if [[ -z "$librespot_source" ]]; then
     librespot_source=$(command -v librespot || true)

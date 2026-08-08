@@ -10,6 +10,8 @@ struct ContentView: View {
     @Environment(JellyfinStore.self) private var jellyfin
     @Environment(PlaybackQueueStore.self) private var queue
     @State private var showingNowPlaying = false
+    @State private var showingOnboarding = false
+    @AppStorage("has-completed-onboarding") private var hasCompletedOnboarding = false
     @State private var globalSearchText = ""
     @State private var searchProvider: SearchProvider = .local
 
@@ -60,6 +62,9 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .uziqShowNowPlaying)) { _ in
             showingNowPlaying = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .uziqShowOnboarding)) { _ in
+            showingOnboarding = true
+        }
         .fileImporter(
             isPresented: $library.showingFolderImporter,
             allowedContentTypes: [.folder],
@@ -92,9 +97,20 @@ struct ContentView: View {
                 .environment(jellyfin)
                 .environment(queue)
         }
+        .sheet(isPresented: $showingOnboarding) {
+            OnboardingView {
+                hasCompletedOnboarding = true
+                showingOnboarding = false
+            }
+            .environment(library)
+            .environment(bandcamp)
+            .environment(spotify)
+            .environment(jellyfin)
+        }
         .task {
             queue.attach(library: library, playback: playback, bandcamp: bandcamp, spotify: spotify, jellyfin: jellyfin)
             synchronizeSearchProvider()
+            if !hasCompletedOnboarding { showingOnboarding = true }
         }
     }
 
@@ -1265,6 +1281,7 @@ struct MiniPlayerView: View {
     @Environment(LibraryStore.self) private var library
     @Environment(BandcampStore.self) private var bandcamp
     @Environment(SpotifyStore.self) private var spotify
+    @Environment(JellyfinStore.self) private var jellyfin
     let onOpen: () -> Void
 
     var body: some View {
@@ -1309,8 +1326,8 @@ struct MiniPlayerView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(
-                            playback.currentTrack == nil ||
-                            (queue.currentItem?.source != .local && queue.currentItem?.source != .bandcamp)
+                            queue.currentItem == nil || queue.currentItem?.source == .spotify ||
+                            (queue.currentItem?.source == .jellyfin && queue.currentItem?.jellyfinItem.map(jellyfin.isUpdatingFavorite) == true)
                         )
                         Button(action: onOpen) {
                             Image(systemName: "list.bullet.rectangle")
@@ -1350,10 +1367,17 @@ struct MiniPlayerView: View {
         queue.currentItem?.source == .spotify ? spotify.playback?.album ?? queue.currentItem?.album ?? "" : playback.currentTrack?.displayAlbum ?? queue.currentItem?.album ?? ""
     }
     private var isCurrentTrackLiked: Bool {
+        if queue.currentItem?.source == .jellyfin, let item = queue.currentItem?.jellyfinItem {
+            return jellyfin.isFavorite(item)
+        }
         guard let track = playback.currentTrack else { return false }
         return track.id.hasPrefix("bandcamp-") ? bandcamp.isSaved(track) : library.isFavorite(track)
     }
     private func toggleCurrentTrackLike() {
+        if queue.currentItem?.source == .jellyfin, let item = queue.currentItem?.jellyfinItem {
+            jellyfin.toggleFavorite(item)
+            return
+        }
         guard let track = playback.currentTrack else { return }
         track.id.hasPrefix("bandcamp-") ? bandcamp.toggleSaved(track) : library.toggleFavorite(track)
     }
@@ -1366,32 +1390,47 @@ private struct PlayerTimeline: View {
     let height: CGFloat
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
-            HStack(spacing: 10) {
-                Text(formatTime(time(at: timeline.date))).frame(width: 42, alignment: .leading)
-                Group {
-                    if queue.currentItem?.source == .spotify, let current = spotify.playback {
-                        StreamingWaveformView(
-                            seed: current.itemID,
-                            progress: current.duration > 0 ? current.effectiveProgress(at: timeline.date) / current.duration : 0,
-                            duration: current.duration,
-                            onSeek: queue.seek
-                        )
-                    } else {
-                        WaveformView(
-                            url: playback.currentTrack?.url,
-                            progress: queue.duration > 0 ? queue.currentTime / queue.duration : 0,
-                            duration: queue.duration,
-                            onSeek: queue.seek
-                        )
-                    }
+        Group {
+            if shouldAnimate {
+                TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
+                    timelineContent(at: timeline.date)
                 }
-                .frame(height: height)
-                Text(formatTime(queue.duration)).frame(width: 42, alignment: .trailing)
+            } else {
+                timelineContent(at: .now)
             }
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(.secondary)
         }
+    }
+
+    private var shouldAnimate: Bool {
+        if queue.currentItem?.source == .spotify { return spotify.playback?.isPlaying == true }
+        return playback.isPlaying
+    }
+
+    private func timelineContent(at date: Date) -> some View {
+        HStack(spacing: 10) {
+            Text(formatTime(time(at: date))).frame(width: 42, alignment: .leading)
+            Group {
+                if queue.currentItem?.source == .spotify, let current = spotify.playback {
+                    StreamingWaveformView(
+                        seed: current.itemID,
+                        progress: current.duration > 0 ? current.effectiveProgress(at: date) / current.duration : 0,
+                        duration: current.duration,
+                        onSeek: queue.seek
+                    )
+                } else {
+                    WaveformView(
+                        url: playback.currentTrack?.url,
+                        progress: queue.duration > 0 ? queue.currentTime / queue.duration : 0,
+                        duration: queue.duration,
+                        onSeek: queue.seek
+                    )
+                }
+            }
+            .frame(height: height)
+            Text(formatTime(queue.duration)).frame(width: 42, alignment: .trailing)
+        }
+        .font(.caption.monospacedDigit())
+        .foregroundStyle(.secondary)
     }
 
     private func time(at date: Date) -> Double {
@@ -1587,6 +1626,15 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section("Setup") {
+                Button {
+                    NotificationCenter.default.post(name: .uziqShowOnboarding, object: nil)
+                } label: {
+                    Label("Run Setup Assistant…", systemImage: "wand.and.stars")
+                }
+                Text("Configure local folders and streaming accounts in one guided flow.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Library folders") {
                 if library.folderRoots.isEmpty {
                     Text("No folders added")

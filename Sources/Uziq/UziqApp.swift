@@ -174,4 +174,5 @@ extension Notification.Name {
     static let uziqPlaybackItemFinished = Notification.Name("uziq.playbackItemFinished")
     static let uziqToggleQueuePlayback = Notification.Name("uziq.toggleQueuePlayback")
     static let uziqShowNowPlaying = Notification.Name("uziq.showNowPlaying")
+    static let uziqShowOnboarding = Notification.Name("uziq.showOnboarding")
 }

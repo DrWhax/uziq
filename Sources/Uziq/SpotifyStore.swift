@@ -12,6 +12,12 @@ final class SpotifyStore {
     nonisolated static let artistAlbumsPageLimit = 10
     nonisolated static let albumTracksPageLimit = 50
 
+    static var bundledClientID: String? {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: "UziqSpotifyClientID") as? String else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
+
     nonisolated static func artistRadioSearchQuery(for artistName: String) -> String {
         let escaped = artistName
             .replacingOccurrences(of: "\\", with: "\\\\")
@@ -64,6 +70,7 @@ final class SpotifyStore {
     @ObservationIgnored private var codeVerifier: String?
     @ObservationIgnored private var authorizationState: String?
     @ObservationIgnored private var playbackTimer: Timer?
+    @ObservationIgnored private var playbackRefreshCancellable: AnyCancellable?
     @ObservationIgnored private var desiredVolume: Float = 1
     @ObservationIgnored private var playbackGeneration = UUID()
     @ObservationIgnored private var artistLoadGeneration = UUID()
@@ -90,7 +97,9 @@ final class SpotifyStore {
     ]
 
     init() {
-        let clientID = UserDefaults.standard.string(forKey: "spotify-client-id") ?? ""
+        let storedClientID = UserDefaults.standard.string(forKey: "spotify-client-id")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let clientID = storedClientID.flatMap { $0.isEmpty ? nil : $0 } ?? Self.bundledClientID ?? ""
         self.clientID = clientID
         api = SpotifyAPI(
             authorizationManager: UziqSpotifyAuthorizationManager(
@@ -134,6 +143,7 @@ final class SpotifyStore {
 
     deinit {
         playbackTimer?.invalidate()
+        playbackRefreshCancellable?.cancel()
         loopbackServer.stop()
         if let localPlaybackObserver { NotificationCenter.default.removeObserver(localPlaybackObserver) }
         if let toggleObserver { NotificationCenter.default.removeObserver(toggleObserver) }
@@ -141,6 +151,11 @@ final class SpotifyStore {
 
     var isConfigured: Bool {
         !clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var isUsingBundledClientID: Bool {
+        guard let bundledClientID = Self.bundledClientID else { return false }
+        return clientID.trimmingCharacters(in: .whitespacesAndNewlines) == bundledClientID
     }
 
     var isUziqPlaybackActive: Bool {
@@ -209,6 +224,8 @@ final class SpotifyStore {
     }
 
     func logOut() {
+        playbackRefreshCancellable?.cancel()
+        playbackRefreshCancellable = nil
         api.authorizationManager.deauthorize()
         SpotifyKeychain.remove(authorizationKey)
         closeDetail()
@@ -513,17 +530,21 @@ final class SpotifyStore {
     }
 
     func refreshPlayback() {
-        guard isAuthorized else { return }
-        api.currentPlayback()
+        guard isAuthorized, playbackRefreshCancellable == nil else { return }
+        playbackRefreshCancellable = api.currentPlayback()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] completion in
+                // Defer release so a synchronously failing publisher cannot be
+                // assigned back into the property after its completion runs.
+                DispatchQueue.main.async { [weak self] in
+                    self?.playbackRefreshCancellable = nil
+                }
                 if case .failure(let error) = completion {
                     self?.error = error.localizedDescription
                 }
             } receiveValue: { [weak self] context in
                 self?.updatePlayback(context)
             }
-            .store(in: &cancellables)
     }
 
     private func completeLogin(_ callbackURL: URL) {
@@ -550,6 +571,8 @@ final class SpotifyStore {
     }
 
     private func rebuildAPI(clientID: String) {
+        playbackRefreshCancellable?.cancel()
+        playbackRefreshCancellable = nil
         cancellables.removeAll()
         api = SpotifyAPI(
             authorizationManager: UziqSpotifyAuthorizationManager(

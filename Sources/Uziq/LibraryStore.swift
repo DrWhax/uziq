@@ -33,6 +33,7 @@ final class LibraryStore {
     var matchingTrackID: String?
     var playlists: [PlaylistSummary] = []
     var favoriteTrackIDs: Set<String> = []
+    private(set) var isInitialLoadComplete = false
 
     @ObservationIgnored private let database = LibraryDatabase()
     @ObservationIgnored private let scanner = LibraryScanner()
@@ -63,6 +64,7 @@ final class LibraryStore {
         }
         Task {
             await refresh()
+            isInitialLoadComplete = true
             await loadFavoriteTrackIDs()
             await loadPlaylists()
             await loadArtistArtwork()

@@ -183,6 +183,7 @@ private struct JellyfinCarousel: View {
 
 private struct JellyfinTile: View {
     @Environment(PlaybackQueueStore.self) private var queue
+    @Environment(JellyfinStore.self) private var jellyfin
     let item: JellyfinCatalogItem
 
     var body: some View {
@@ -196,6 +197,10 @@ private struct JellyfinTile: View {
         .frame(width: 148, alignment: .leading)
         .contextMenu {
             if item.kind == .track {
+                Button(jellyfin.isFavorite(item) ? "Remove from Liked Tracks" : "Add to Liked Tracks") {
+                    jellyfin.toggleFavorite(item)
+                }
+                .disabled(jellyfin.isUpdatingFavorite(item))
                 Button("Play Next") { queue.playNext(item) }
                 Button("Add to Queue") { queue.add(item) }
             }
@@ -205,6 +210,7 @@ private struct JellyfinTile: View {
 
 private struct JellyfinResultSection: View {
     @Environment(PlaybackQueueStore.self) private var queue
+    @Environment(JellyfinStore.self) private var jellyfin
     let title: String
     let items: [JellyfinCatalogItem]
 
@@ -237,6 +243,14 @@ private struct JellyfinResultSection: View {
                         }
                     }
                     .padding(.vertical, 6)
+                    .contextMenu {
+                        if item.kind == .track {
+                            Button(jellyfin.isFavorite(item) ? "Remove from Liked Tracks" : "Add to Liked Tracks") {
+                                jellyfin.toggleFavorite(item)
+                            }
+                            .disabled(jellyfin.isUpdatingFavorite(item))
+                        }
+                    }
                     Divider()
                 }
             }
@@ -358,6 +372,7 @@ private struct JellyfinArtistDetail: View {
 
 private struct JellyfinTrackList: View {
     @Environment(PlaybackQueueStore.self) private var queue
+    @Environment(JellyfinStore.self) private var jellyfin
     let tracks: [JellyfinCatalogItem]
 
     var body: some View {
@@ -380,6 +395,10 @@ private struct JellyfinTrackList: View {
                 }
                 .buttonStyle(.plain)
                 .contextMenu {
+                    Button(jellyfin.isFavorite(track) ? "Remove from Liked Tracks" : "Add to Liked Tracks") {
+                        jellyfin.toggleFavorite(track)
+                    }
+                    .disabled(jellyfin.isUpdatingFavorite(track))
                     Button("Play Next") { queue.playNext(track) }
                     Button("Add to Queue") { queue.add(track) }
                 }

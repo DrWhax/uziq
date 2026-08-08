@@ -337,6 +337,7 @@ final class PlaybackQueueStore {
         case .local, .bandcamp, .jellyfin:
             if playback?.currentTrack == nil { dispatchCurrent() } else { playback?.toggle() }
         }
+        persistSession()
     }
 
     func next() {
@@ -522,7 +523,9 @@ final class PlaybackQueueStore {
             jellyfinPrefetchedItemID = jellyfinItem.id
             jellyfin?.prefetch(jellyfinItem)
         }
-        persistSession()
+        // Structural queue changes persist immediately. This timer only needs to
+        // checkpoint a position while audio is advancing.
+        if isPlaying { persistSession() }
     }
 
     private var nextSequentialItem: UnifiedQueueItem? {

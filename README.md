@@ -69,3 +69,11 @@ The password is used only for sign-in and is never stored. The access token is s
 ## Packaging
 
 Run `Scripts/build-app.sh release` to create `dist/Uziq.app`. The script bundles the installed librespot executable and its MIT license, verifies that its architecture matches Uziq, and signs the complete app bundle. Set `UZIQ_LIBRESPOT_PATH=/path/to/librespot` to package a specific build.
+
+For a family build that requires no Spotify developer configuration on the destination Mac, package the non-secret Client ID into the app:
+
+```sh
+UZIQ_SPOTIFY_CLIENT_ID=your_client_id ./Scripts/build-app.sh release
+```
+
+The Spotify developer app must include `http://127.0.0.1:8989/callback` as a Redirect URI. The first-run assistant then asks the recipient only to connect their Spotify account.

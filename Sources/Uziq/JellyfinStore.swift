@@ -19,6 +19,7 @@ final class JellyfinStore {
     private(set) var artists: [JellyfinCatalogItem] = []
     private(set) var playlists: [JellyfinCatalogItem] = []
     private(set) var favoriteTracks: [JellyfinCatalogItem] = []
+    private(set) var favoriteMutationIDs: Set<String> = []
     private(set) var searchTracks: [JellyfinCatalogItem] = []
     private(set) var searchAlbums: [JellyfinCatalogItem] = []
     private(set) var searchArtists: [JellyfinCatalogItem] = []
@@ -60,6 +61,43 @@ final class JellyfinStore {
     var profileName: String? { session?.username }
 
     func clearError() { error = nil }
+
+    func isFavorite(_ item: JellyfinCatalogItem) -> Bool {
+        favoriteTracks.contains { $0.id == item.id }
+    }
+
+    func isUpdatingFavorite(_ item: JellyfinCatalogItem) -> Bool {
+        favoriteMutationIDs.contains(item.id)
+    }
+
+    func toggleFavorite(_ item: JellyfinCatalogItem) {
+        guard item.kind == .track, let client, let session,
+              !favoriteMutationIDs.contains(item.id) else { return }
+        let wasFavorite = isFavorite(item)
+        let shouldFavorite = !wasFavorite
+        favoriteMutationIDs.insert(item.id)
+        setFavorite(item, isFavorite: shouldFavorite)
+
+        Task {
+            do {
+                let userData: UserItemDataDto
+                if shouldFavorite {
+                    userData = try await client.send(
+                        Paths.markFavoriteItem(itemID: item.id, userID: session.userID)
+                    ).value
+                } else {
+                    userData = try await client.send(
+                        Paths.unmarkFavoriteItem(itemID: item.id, userID: session.userID)
+                    ).value
+                }
+                setFavorite(item, isFavorite: userData.isFavorite ?? shouldFavorite)
+            } catch {
+                setFavorite(item, isFavorite: wasFavorite)
+                self.error = "Jellyfin could not update this favorite: \(error.localizedDescription)"
+            }
+            favoriteMutationIDs.remove(item.id)
+        }
+    }
 
     func connect(password: String) {
         guard !isConnecting else { return }
@@ -453,6 +491,14 @@ final class JellyfinStore {
         searchAlbums = []
         searchArtists = []
         searchPlaylists = []
+    }
+
+    private func setFavorite(_ item: JellyfinCatalogItem, isFavorite: Bool) {
+        favoriteTracks.removeAll { $0.id == item.id }
+        if isFavorite {
+            favoriteTracks.append(item)
+            favoriteTracks.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }
     }
 
     private func handleAPIError(_ error: Error) {
