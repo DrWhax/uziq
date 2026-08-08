@@ -43,7 +43,7 @@ final class LibraryDatabaseTests: XCTestCase {
         XCTAssertEqual(mostPlayed.first?.playCount, 2)
     }
 
-    func testFLACVorbisCommentsAreRead() throws {
+    func testFLACVorbisCommentsAreRead() async throws {
         let comments = [
             "TITLE=Tagged Track",
             "ARTIST=Tagged Artist",
@@ -74,7 +74,7 @@ final class LibraryDatabaseTests: XCTestCase {
         try flac.write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
 
-        let metadata = try MetadataReader.read(url)
+        let metadata = try await MetadataReader.read(url)
         XCTAssertEqual(metadata.title, "Tagged Track")
         XCTAssertEqual(metadata.artist, "Tagged Artist")
         XCTAssertEqual(metadata.album, "Tagged Album")

@@ -26,7 +26,7 @@ struct LibraryScanner: Sendable {
                 let index = nextIndex
                 nextIndex += 1
                 group.addTask {
-                    (index, try? MetadataReader.read(files[index]))
+                    (index, try? await MetadataReader.read(files[index]))
                 }
             }
 
@@ -42,7 +42,7 @@ struct LibraryScanner: Sendable {
                     let index = nextIndex
                     nextIndex += 1
                     group.addTask {
-                        (index, try? MetadataReader.read(files[index]))
+                        (index, try? await MetadataReader.read(files[index]))
                     }
                 }
             }

@@ -10,36 +10,45 @@ struct MetadataReader: Sendable {
         audioExtensions.contains(url.pathExtension.lowercased())
     }
 
-    static func read(_ url: URL) throws -> TrackMetadata {
+    static func read(_ url: URL) async throws -> TrackMetadata {
         guard supports(url) else { throw UziqError.unsupportedFile(url) }
         let values = try? FileManager.default.attributesOfItem(atPath: url.path)
         let modifiedAt = (values?[.modificationDate] as? Date) ?? .now
         let fileSize = (values?[.size] as? NSNumber)?.int64Value ?? 0
         let fallback = readVorbisComments(from: url)
-        let asset = AVAsset(url: url)
-        let common = asset.commonMetadata
+        let asset = AVURLAsset(url: url)
+        async let commonMetadata = asset.load(.commonMetadata)
+        async let assetDuration = asset.load(.duration)
+        let common = (try? await commonMetadata) ?? []
 
-        let title = firstNonEmpty(stringValue(common, key: .commonKeyTitle), fallback["TITLE"]) ?? fallbackFileName(for: url)
-        let artist = firstNonEmpty(stringValue(common, key: .commonKeyArtist), fallback["ARTIST"]) ?? ""
-        let album = firstNonEmpty(stringValue(common, key: .commonKeyAlbumName), fallback["ALBUM"]) ?? ""
-        let genre = firstNonEmpty(stringValue(common, identifier: "com.apple.iTunes", key: "Genre"), fallback["GENRE"]) ?? ""
-        let year = firstNonEmpty(stringValue(common, key: .commonKeyCreationDate), fallback["DATE"], fallback["YEAR"]) ?? ""
+        let title = firstNonEmpty(await stringValue(common, key: .commonKeyTitle), fallback["TITLE"]) ?? fallbackFileName(for: url)
+        let artist = firstNonEmpty(await stringValue(common, key: .commonKeyArtist), fallback["ARTIST"]) ?? ""
+        let album = firstNonEmpty(await stringValue(common, key: .commonKeyAlbumName), fallback["ALBUM"]) ?? ""
+        let genre = firstNonEmpty(await stringValue(common, identifier: "com.apple.iTunes", key: "Genre"), fallback["GENRE"]) ?? ""
+        let year = firstNonEmpty(await stringValue(common, key: .commonKeyCreationDate), fallback["DATE"], fallback["YEAR"]) ?? ""
         let albumArtist = firstNonEmpty(
-            stringValue(common, identifier: "com.apple.iTunes", key: "albumArtist"),
+            await stringValue(common, identifier: "com.apple.iTunes", key: "albumArtist"),
             fallbackValue(fallback, keys: ["ALBUMARTIST", "ALBUM_ARTIST", "ALBUM ARTIST"])
         ) ?? artist
-        let trackNumber = integerValue(common, identifier: "com.apple.iTunes", key: "trackNumber")
+        let trackNumber = await integerValue(common, identifier: "com.apple.iTunes", key: "trackNumber")
             ?? integerTag(fallback, keys: ["TRACKNUMBER", "TRACK", "TRACKNUM", "TRACK_NUMBER"])
-        let discNumber = integerValue(common, identifier: "com.apple.iTunes", key: "discNumber")
+        let discNumber = await integerValue(common, identifier: "com.apple.iTunes", key: "discNumber")
             ?? integerTag(fallback, keys: ["DISCNUMBER", "DISC", "DISCNUM", "DISC_NUMBER"])
-        let lyrics = firstNonEmpty(stringValue(common, identifier: "com.apple.iTunes", key: "lyrics"), fallback["LYRICS"])
-        let recordingID = firstNonEmpty(stringValue(common, identifier: "com.apple.iTunes", key: "MusicBrainz Track Id"), fallback["MUSICBRAINZ_TRACKID"])
-        let releaseID = firstNonEmpty(stringValue(common, identifier: "com.apple.iTunes", key: "MusicBrainz Album Id"), fallback["MUSICBRAINZ_ALBUMID"])
-        let artwork = common.first { item in
+        let lyrics = firstNonEmpty(await stringValue(common, identifier: "com.apple.iTunes", key: "lyrics"), fallback["LYRICS"])
+        let recordingID = firstNonEmpty(await stringValue(common, identifier: "com.apple.iTunes", key: "MusicBrainz Track Id"), fallback["MUSICBRAINZ_TRACKID"])
+        let releaseID = firstNonEmpty(await stringValue(common, identifier: "com.apple.iTunes", key: "MusicBrainz Album Id"), fallback["MUSICBRAINZ_ALBUMID"])
+        let artworkItem = common.first { item in
             item.commonKey?.rawValue == AVMetadataKey.commonKeyArtwork.rawValue
-        }?.dataValue ?? readVorbisArtwork(from: url)
+        }
+        let embeddedArtwork: Data? = if let artworkItem {
+            try? await artworkItem.load(.dataValue)
+        } else {
+            nil
+        }
+        let artwork = embeddedArtwork ?? readVorbisArtwork(from: url)
 
-        let seconds = asset.duration.isNumeric ? CMTimeGetSeconds(asset.duration) : 0
+        let duration = (try? await assetDuration) ?? .zero
+        let seconds = duration.isNumeric ? CMTimeGetSeconds(duration) : 0
         let format = try? AVAudioFile(forReading: url)
         let sampleRate = format?.processingFormat.sampleRate
         let codec = format.map { String(describing: $0.fileFormat.formatDescription) } ?? url.pathExtension.uppercased()
@@ -74,21 +83,23 @@ struct MetadataReader: Sendable {
         _ items: [AVMetadataItem],
         key: AVMetadataKey,
         identifier: AVMetadataIdentifier? = nil
-    ) -> String? {
+    ) async -> String? {
         let item = items.first { candidate in
             if let identifier { return candidate.identifier?.rawValue == identifier.rawValue }
             return candidate.commonKey?.rawValue == key.rawValue
         }
-        return (item?.stringValue ?? item?.value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let item, let value = try? await item.load(.stringValue) else { return nil }
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func stringValue(_ items: [AVMetadataItem], identifier: String, key: String) -> String? {
+    private static func stringValue(_ items: [AVMetadataItem], identifier: String, key: String) async -> String? {
         guard let item = items.first(where: { $0.identifier?.rawValue == "\(identifier)/\(key)" }) else { return nil }
-        return (item.stringValue ?? item.value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = try? await item.load(.stringValue) else { return nil }
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func integerValue(_ items: [AVMetadataItem], identifier: String, key: String) -> Int? {
-        guard let string = stringValue(items, identifier: identifier, key: key) else { return nil }
+    private static func integerValue(_ items: [AVMetadataItem], identifier: String, key: String) async -> Int? {
+        guard let string = await stringValue(items, identifier: identifier, key: key) else { return nil }
         return Int(string.components(separatedBy: "/").first ?? string)
     }
 
