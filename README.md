@@ -39,6 +39,8 @@ This creates a versioned DMG, ZIP, and SHA-256 checksum file in `dist/`. On the 
 
 Use a track or result's context menu to choose **Play Next** or **Add to Queue**. The queue, selected item, playback position, shuffle/repeat mode, and volume are restored between launches.
 
+Uziq also publishes the current title, artist, album, artwork, duration, and playback state to macOS Now Playing. Control Center and compatible media keys can play, pause, seek, and move through the universal queue.
+
 ## Current foundation
 
 - SwiftUI + Observation UI architecture
@@ -48,6 +50,8 @@ Use a track or result's context menu to choose **Play Next** or **Add to Queue**
 - Embedded metadata, artwork, and lyrics extraction
 - AVAudioEngine playback with queue controls, waveform seeking, and equalization
 - Persistent universal queue with Play Next, reordering, shuffle, repeat, and session restoration
+- macOS Now Playing and Control Center metadata, seeking, and transport controls
+- Privacy-conscious diagnostics report export with a small rotating event log
 - Bandcamp search, subscriptions, streaming, favorites, and expiring audio cache
 - Spotify PKCE login, personal library, catalog search, and playback through librespot's native CoreAudio output
 - Jellyfin account login, music-library browsing, artwork, playlists, search, queued playback, and expiring audio cache

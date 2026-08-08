@@ -166,6 +166,7 @@ final class PlaybackQueueStore {
     @ObservationIgnored private var isDispatching = false
     @ObservationIgnored private var isRestoringSession = false
     @ObservationIgnored private let sessionURLOverride: URL?
+    @ObservationIgnored private var nowPlayingController: NowPlayingController?
 
     init(sessionURL: URL? = nil) {
         sessionURLOverride = sessionURL
@@ -220,7 +221,20 @@ final class PlaybackQueueStore {
         self.jellyfin = jellyfin
         playback.volume = volume
         spotify.attachPlaybackEngine(playback)
+        if nowPlayingController == nil {
+            let controller = NowPlayingController()
+            controller.configure(
+                play: { [weak self] in self?.play() },
+                pause: { [weak self] in self?.pause() },
+                toggle: { [weak self] in self?.toggle() },
+                next: { [weak self] in self?.next() },
+                previous: { [weak self] in self?.previous() },
+                seek: { [weak self] in self?.seek(to: $0) }
+            )
+            nowPlayingController = controller
+        }
         resolveRestoredSession()
+        updateNowPlaying(force: true)
     }
 
     func replace(with tracks: [Track], startingAt track: Track) {
@@ -296,6 +310,7 @@ final class PlaybackQueueStore {
             }
         }
         persistSession()
+        updateNowPlaying(force: true)
     }
 
     func move(from offsets: IndexSet, to destination: Int) {
@@ -307,6 +322,7 @@ final class PlaybackQueueStore {
         items.insert(contentsOf: moving, at: insertion)
         currentIndex = currentID.flatMap { id in items.firstIndex(where: { $0.id == id }) }
         persistSession()
+        updateNowPlaying(force: true)
     }
 
     func clear() {
@@ -316,6 +332,7 @@ final class PlaybackQueueStore {
         restoredPosition = 0
         if source == .spotify { spotify?.pause() } else { playback?.stop() }
         persistSession()
+        updateNowPlaying(force: true)
     }
 
     func clearError() { error = nil }
@@ -339,6 +356,15 @@ final class PlaybackQueueStore {
             if playback?.currentTrack == nil { dispatchCurrent() } else { playback?.toggle() }
         }
         persistSession()
+        updateNowPlaying(force: true)
+    }
+
+    func play() {
+        if !isPlaying { toggle() }
+    }
+
+    func pause() {
+        if isPlaying { toggle() }
     }
 
     func next() {
@@ -385,6 +411,7 @@ final class PlaybackQueueStore {
             playback?.seek(to: restoredPosition)
         }
         persistSession()
+        updateNowPlaying(force: true)
     }
 
     var isPlaying: Bool {
@@ -418,12 +445,14 @@ final class PlaybackQueueStore {
         case .all: repeatMode = .one
         case .one: repeatMode = .off
         }
+        updateNowPlaying(force: true)
     }
 
     private func append(_ item: UnifiedQueueItem) {
         items.append(item)
         if currentIndex == nil { currentIndex = 0 }
         persistSession()
+        updateNowPlaying(force: true)
     }
 
     private func insertNext(_ item: UnifiedQueueItem) {
@@ -431,6 +460,7 @@ final class PlaybackQueueStore {
         items.insert(item, at: index)
         if currentIndex == nil { currentIndex = 0 }
         persistSession()
+        updateNowPlaying(force: true)
     }
 
     private func dispatchCurrent() {
@@ -439,10 +469,12 @@ final class PlaybackQueueStore {
         defer {
             isDispatching = false
             persistSession()
+            updateNowPlaying(force: true)
         }
         error = nil
         spotifyPlaybackSeen = false
         jellyfinPrefetchedItemID = nil
+        DiagnosticsLog.shared.record("playback", "Dispatching \(item.source.title) queue item")
         switch item.source {
         case .local:
             bandcamp?.cancelPendingPlayback()
@@ -496,6 +528,7 @@ final class PlaybackQueueStore {
               playback?.currentTrack == nil,
               let track = localTrack(for: item) else { return }
         playback?.restore(track, at: restoredPosition)
+        updateNowPlaying(force: true)
     }
 
     private func timerFired() {
@@ -530,6 +563,33 @@ final class PlaybackQueueStore {
         if isPlaying, Date.now.timeIntervalSince(lastPositionCheckpoint) >= 15 {
             persistSession()
         }
+        updateNowPlaying()
+    }
+
+    private func updateNowPlaying(force: Bool = false) {
+        guard let item = currentItem else {
+            nowPlayingController?.update(nil)
+            return
+        }
+
+        let activeTrack = item.source == .spotify ? nil : playback?.currentTrack
+        let spotifySnapshot = item.source == .spotify ? spotify?.playback : nil
+        let snapshot = NowPlayingSnapshot(
+            itemID: item.id,
+            sourceID: item.sourceID,
+            source: item.source,
+            title: spotifySnapshot?.title ?? activeTrack?.displayTitle ?? item.title,
+            artist: spotifySnapshot?.artist ?? activeTrack?.displayArtist ?? item.artist,
+            album: spotifySnapshot?.album ?? activeTrack?.displayAlbum ?? item.album,
+            duration: max(0, duration.isFinite ? duration : 0),
+            elapsed: max(0, currentTime.isFinite ? currentTime : 0),
+            isPlaying: isPlaying,
+            hasPrevious: hasPrevious,
+            hasNext: hasNext,
+            artworkData: activeTrack?.artworkData,
+            artworkURL: spotifySnapshot?.artworkURL ?? item.artworkURL
+        )
+        nowPlayingController?.update(snapshot, force: force)
     }
 
     private var nextSequentialItem: UnifiedQueueItem? {

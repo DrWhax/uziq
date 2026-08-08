@@ -1620,9 +1620,11 @@ struct SettingsView: View {
     @Environment(BandcampStore.self) private var bandcamp
     @Environment(SpotifyStore.self) private var spotify
     @Environment(JellyfinStore.self) private var jellyfin
+    @Environment(PlaybackQueueStore.self) private var queue
     @State private var bandcampPassword = ""
     @State private var bandcampAuthCode = ""
     @State private var jellyfinPassword = ""
+    @State private var diagnosticsMessage: String?
 
     var body: some View {
         Form {
@@ -1836,7 +1838,16 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                Divider()
+                HStack {
+                    Label("Spotify audio", systemImage: "music.note.house.fill")
+                    Spacer()
+                    Text("Not cached")
+                        .foregroundStyle(.secondary)
+                }
+                Text("Spotify streams directly through librespot. Audio caching is disabled, so there is nothing to clean up here.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 HStack {
                     Label("Jellyfin audio", systemImage: "server.rack")
                     Spacer()
@@ -1963,6 +1974,22 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section("Diagnostics") {
+                Button {
+                    exportDiagnostics()
+                } label: {
+                    Label("Export Diagnostics…", systemImage: "doc.badge.arrow.up")
+                }
+                if let diagnosticsMessage {
+                    Text(diagnosticsMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                Text("Exports app, library, connection, cache, playback, and recent event information. Passwords, tokens, full home paths, raw librespot output, and complete music file paths are excluded.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .padding(24)
@@ -2001,6 +2028,35 @@ struct SettingsView: View {
         panel.prompt = "Choose librespot"
         if panel.runModal() == .OK, let url = panel.url {
             spotify.librespot.executablePath = url.path
+        }
+    }
+
+    private func exportDiagnostics() {
+        let panel = NSSavePanel()
+        panel.title = "Export Uziq Diagnostics"
+        panel.prompt = "Export"
+        panel.allowedContentTypes = [.plainText]
+        panel.canCreateDirectories = true
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        panel.nameFieldStringValue = "Uziq-Diagnostics-\(formatter.string(from: .now)).txt"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let report = DiagnosticsReport.make(
+            library: library,
+            playback: playback,
+            bandcamp: bandcamp,
+            spotify: spotify,
+            jellyfin: jellyfin,
+            queue: queue
+        )
+        do {
+            try report.write(to: url, atomically: true, encoding: String.Encoding.utf8)
+            diagnosticsMessage = "Exported \(url.lastPathComponent)"
+            DiagnosticsLog.shared.record("diagnostics", "Export completed")
+        } catch {
+            diagnosticsMessage = "Export failed: \(error.localizedDescription)"
+            DiagnosticsLog.shared.record("diagnostics", "Export failed: \(error.localizedDescription)")
         }
     }
 }

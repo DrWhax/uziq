@@ -97,6 +97,7 @@ struct UziqApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var keyMonitor: Any?
     private var terminationSignalSources: [DispatchSourceSignal] = []
+    private var workspaceObservers: [NSObjectProtocol] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // SwiftPM launches an executable rather than a packaged .app. Explicitly
@@ -108,6 +109,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.applicationIconImage = icon
         }
         NSApp.activate(ignoringOtherApps: true)
+        DiagnosticsLog.shared.record("app", "Uziq launched")
+        installWorkspaceObservers()
         installTerminationSignalHandlers()
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -147,10 +150,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        DiagnosticsLog.shared.record("app", "Uziq terminating")
         NotificationCenter.default.post(name: .uziqWillTerminate, object: nil)
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        workspaceObservers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
+        workspaceObservers.removeAll()
         terminationSignalSources.forEach { $0.cancel() }
         terminationSignalSources.removeAll()
+    }
+
+    private func installWorkspaceObservers() {
+        let center = NSWorkspace.shared.notificationCenter
+        workspaceObservers = [
+            center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
+                DiagnosticsLog.shared.record("system", "Mac will sleep")
+            },
+            center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
+                DiagnosticsLog.shared.record("system", "Mac woke from sleep")
+            }
+        ]
     }
 
     private func installTerminationSignalHandlers() {
