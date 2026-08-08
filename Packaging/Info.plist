@@ -24,8 +24,15 @@
     <string>2</string>
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Uziq connects to Jellyfin music servers on your local network.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>

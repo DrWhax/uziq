@@ -1,6 +1,60 @@
+import Combine
 import Foundation
 import Network
 import Security
+import SpotifyWebAPI
+
+typealias UziqSpotifyAuthorizationManager =
+    AuthorizationCodeFlowPKCEBackendManager<UziqSpotifyPKCEBackend>
+
+struct UziqSpotifyPKCEBackend: AuthorizationCodeFlowPKCEBackend {
+    let clientId: String
+
+    private enum CodingKeys: String, CodingKey {
+        case clientId = "client_id"
+    }
+
+    func requestAccessAndRefreshTokens(
+        code: String,
+        codeVerifier: String,
+        redirectURIWithQuery: URL
+    ) -> AnyPublisher<(data: Data, response: HTTPURLResponse), Error> {
+        standardBackend.requestAccessAndRefreshTokens(
+            code: code,
+            codeVerifier: codeVerifier,
+            redirectURIWithQuery: redirectURIWithQuery
+        )
+    }
+
+    func refreshTokens(
+        refreshToken: String
+    ) -> AnyPublisher<(data: Data, response: HTTPURLResponse), Error> {
+        standardBackend.refreshTokens(refreshToken: refreshToken)
+            .map { output in
+                guard (200..<300).contains(output.response.statusCode) else { return output }
+                return (
+                    data: Self.retainingRefreshToken(in: output.data, fallback: refreshToken),
+                    response: output.response
+                )
+            }
+            .eraseToAnyPublisher()
+    }
+
+    nonisolated static func retainingRefreshToken(in data: Data, fallback: String) -> Data {
+        guard var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["refresh_token"] == nil else { return data }
+        object["refresh_token"] = fallback
+        return (try? JSONSerialization.data(withJSONObject: object)) ?? data
+    }
+
+    private var standardBackend: AuthorizationCodeFlowPKCEClientBackend {
+        AuthorizationCodeFlowPKCEClientBackend(clientId: clientId)
+    }
+}
+
+extension AuthorizationCodeFlowPKCEBackendManager where Backend == UziqSpotifyPKCEBackend {
+    var clientId: String { backend.clientId }
+}
 
 enum SpotifyKeychain {
     private static let service = "app.uziq.spotify"

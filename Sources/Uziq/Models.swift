@@ -10,6 +10,7 @@ enum LibrarySection: String, CaseIterable, Identifiable {
     case recentlyAdded
     case bandcamp
     case spotify
+    case jellyfin
     case settings
 
     var id: String { rawValue }
@@ -25,6 +26,7 @@ enum LibrarySection: String, CaseIterable, Identifiable {
         case .recentlyAdded: "Recently Added"
         case .bandcamp: "Bandcamp"
         case .spotify: "Spotify"
+        case .jellyfin: "Jellyfin"
         case .settings: "Settings"
         }
     }
@@ -40,6 +42,7 @@ enum LibrarySection: String, CaseIterable, Identifiable {
         case .recentlyAdded: "clock"
         case .bandcamp: "dot.radiowaves.left.and.right"
         case .spotify: "music.note.house.fill"
+        case .jellyfin: "server.rack"
         case .settings: "gearshape"
         }
     }
@@ -324,6 +327,12 @@ struct BandcampAlbumDetails: Identifiable, Hashable, Sendable {
     let artist: String
     let artworkURL: URL?
     let tracks: [BandcampTrackDetails]
+}
+
+struct BandcampArtistPage: Sendable {
+    let artist: BandcampResult
+    let summary: String?
+    let releases: [BandcampResult]
 }
 
 enum UziqError: LocalizedError {

@@ -5,14 +5,23 @@ enum PlaybackSource: String, Codable, CaseIterable, Sendable {
     case local
     case bandcamp
     case spotify
+    case jellyfin
 
-    var title: String { rawValue.capitalized }
+    var title: String {
+        switch self {
+        case .local: "Local Library"
+        case .bandcamp: "Bandcamp"
+        case .spotify: "Spotify"
+        case .jellyfin: "Jellyfin"
+        }
+    }
 
     var systemImage: String {
         switch self {
         case .local: "internaldrive"
         case .bandcamp: "dot.radiowaves.left.and.right"
         case .spotify: "music.note.house.fill"
+        case .jellyfin: "server.rack"
         }
     }
 }
@@ -45,6 +54,7 @@ struct UnifiedQueueItem: Identifiable, Codable, Hashable, Sendable {
     let artworkURL: URL?
     let bandcampResult: BandcampResult?
     let spotifyItem: SpotifyCatalogItem?
+    let jellyfinItem: JellyfinCatalogItem?
 
     init(local track: Track) {
         id = UUID()
@@ -58,6 +68,7 @@ struct UnifiedQueueItem: Identifiable, Codable, Hashable, Sendable {
         artworkURL = nil
         bandcampResult = nil
         spotifyItem = nil
+        jellyfinItem = nil
     }
 
     init(bandcamp result: BandcampResult) {
@@ -72,6 +83,7 @@ struct UnifiedQueueItem: Identifiable, Codable, Hashable, Sendable {
         artworkURL = result.artworkURL
         bandcampResult = result
         spotifyItem = nil
+        jellyfinItem = nil
     }
 
     init(spotify item: SpotifyCatalogItem) {
@@ -86,6 +98,22 @@ struct UnifiedQueueItem: Identifiable, Codable, Hashable, Sendable {
         artworkURL = item.artworkURL
         bandcampResult = nil
         spotifyItem = item
+        jellyfinItem = nil
+    }
+
+    init(jellyfin item: JellyfinCatalogItem) {
+        id = UUID()
+        source = .jellyfin
+        sourceID = item.id
+        title = item.name
+        artist = item.subtitle
+        album = item.album
+        duration = item.duration
+        localURL = nil
+        artworkURL = nil
+        bandcampResult = nil
+        spotifyItem = nil
+        jellyfinItem = item
     }
 }
 
@@ -128,10 +156,12 @@ final class PlaybackQueueStore {
     @ObservationIgnored private weak var playback: PlaybackEngine?
     @ObservationIgnored private weak var bandcamp: BandcampStore?
     @ObservationIgnored private weak var spotify: SpotifyStore?
+    @ObservationIgnored private weak var jellyfin: JellyfinStore?
     @ObservationIgnored private var finishObserver: NSObjectProtocol?
     @ObservationIgnored private var toggleObserver: NSObjectProtocol?
     @ObservationIgnored private var persistTimer: Timer?
     @ObservationIgnored private var spotifyPlaybackSeen = false
+    @ObservationIgnored private var jellyfinPrefetchedItemID: String?
     @ObservationIgnored private var isDispatching = false
     @ObservationIgnored private var isRestoringSession = false
     @ObservationIgnored private let sessionURLOverride: URL?
@@ -179,12 +209,14 @@ final class PlaybackQueueStore {
         library: LibraryStore,
         playback: PlaybackEngine,
         bandcamp: BandcampStore,
-        spotify: SpotifyStore
+        spotify: SpotifyStore,
+        jellyfin: JellyfinStore
     ) {
         self.library = library
         self.playback = playback
         self.bandcamp = bandcamp
         self.spotify = spotify
+        self.jellyfin = jellyfin
         playback.volume = volume
         spotify.attachPlaybackEngine(playback)
         resolveRestoredSession()
@@ -214,6 +246,15 @@ final class PlaybackQueueStore {
         dispatchCurrent()
     }
 
+    func replace(with item: JellyfinCatalogItem, context: [JellyfinCatalogItem]? = nil) {
+        let playableContext = (context ?? [item]).filter { $0.kind == .track }
+        guard !playableContext.isEmpty else { return }
+        items = playableContext.map(UnifiedQueueItem.init(jellyfin:))
+        currentIndex = playableContext.firstIndex(of: item) ?? 0
+        restoredPosition = 0
+        dispatchCurrent()
+    }
+
     func play(_ item: UnifiedQueueItem) {
         guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
         currentIndex = index
@@ -224,10 +265,12 @@ final class PlaybackQueueStore {
     func add(_ track: Track) { append(UnifiedQueueItem(local: track)) }
     func add(_ result: BandcampResult) { append(UnifiedQueueItem(bandcamp: result)) }
     func add(_ item: SpotifyCatalogItem) { append(UnifiedQueueItem(spotify: item)) }
+    func add(_ item: JellyfinCatalogItem) { append(UnifiedQueueItem(jellyfin: item)) }
 
     func playNext(_ track: Track) { insertNext(UnifiedQueueItem(local: track)) }
     func playNext(_ result: BandcampResult) { insertNext(UnifiedQueueItem(bandcamp: result)) }
     func playNext(_ item: SpotifyCatalogItem) { insertNext(UnifiedQueueItem(spotify: item)) }
+    func playNext(_ item: JellyfinCatalogItem) { insertNext(UnifiedQueueItem(jellyfin: item)) }
 
     func remove(at offsets: IndexSet) {
         let oldCurrentID = currentItem?.id
@@ -291,7 +334,7 @@ final class PlaybackQueueStore {
             } else {
                 dispatchCurrent()
             }
-        case .local, .bandcamp:
+        case .local, .bandcamp, .jellyfin:
             if playback?.currentTrack == nil { dispatchCurrent() } else { playback?.toggle() }
         }
     }
@@ -397,9 +440,11 @@ final class PlaybackQueueStore {
         }
         error = nil
         spotifyPlaybackSeen = false
+        jellyfinPrefetchedItemID = nil
         switch item.source {
         case .local:
             bandcamp?.cancelPendingPlayback()
+            jellyfin?.cancelPendingPlayback()
             guard let track = localTrack(for: item) else {
                 error = "The local file for \(item.title) is no longer available."
                 DispatchQueue.main.async { [weak self] in self?.next() }
@@ -408,6 +453,7 @@ final class PlaybackQueueStore {
             playback?.play(track)
             if restoredPosition > 0 { playback?.seek(to: restoredPosition) }
         case .bandcamp:
+            jellyfin?.cancelPendingPlayback()
             guard let result = item.bandcampResult, let playback, let bandcamp else { return }
             bandcamp.play(result, using: playback) { [weak self] message in
                 self?.error = "Bandcamp could not play \(item.title): \(message)"
@@ -415,6 +461,7 @@ final class PlaybackQueueStore {
             seekWhenPlaybackStarts(itemID: item.id, seconds: restoredPosition)
         case .spotify:
             bandcamp?.cancelPendingPlayback()
+            jellyfin?.cancelPendingPlayback()
             guard let spotifyItem = item.spotifyItem else { return }
             guard spotify?.isAuthorized == true else {
                 error = "Reconnect Spotify before playing \(item.title)."
@@ -422,6 +469,17 @@ final class PlaybackQueueStore {
             }
             spotify?.play(spotifyItem)
             seekSpotifyAfterStart(itemID: item.id, seconds: restoredPosition)
+        case .jellyfin:
+            bandcamp?.cancelPendingPlayback()
+            guard let jellyfinItem = item.jellyfinItem, let playback, let jellyfin else { return }
+            guard jellyfin.isConnected else {
+                error = "Reconnect Jellyfin before playing \(item.title)."
+                return
+            }
+            jellyfin.play(jellyfinItem, using: playback) { [weak self] message in
+                self?.error = "Jellyfin could not play \(item.title): \(message)"
+            }
+            seekWhenPlaybackStarts(itemID: item.id, seconds: restoredPosition)
         }
     }
 
@@ -441,6 +499,13 @@ final class PlaybackQueueStore {
     private func timerFired() {
         if currentItem?.source == .spotify, let snapshot = spotify?.playback {
             if snapshot.itemID == currentItem?.sourceID {
+                if spotifyPlaybackSeen,
+                   (hasNext || repeatMode == .one),
+                   Self.spotifyPlaybackReachedEnd(snapshot, at: .now) {
+                    spotifyPlaybackSeen = false
+                    advanceAfterCompletion()
+                    return
+                }
                 spotifyPlaybackSeen = true
             } else if spotifyPlaybackSeen && snapshot.isPlaying {
                 spotifyPlaybackSeen = false
@@ -448,7 +513,31 @@ final class PlaybackQueueStore {
                 return
             }
         }
+        if currentItem?.source == .jellyfin,
+           duration > 0,
+           duration - currentTime <= 15,
+           let nextItem = nextSequentialItem,
+           let jellyfinItem = nextItem.jellyfinItem,
+           jellyfinPrefetchedItemID != jellyfinItem.id {
+            jellyfinPrefetchedItemID = jellyfinItem.id
+            jellyfin?.prefetch(jellyfinItem)
+        }
         persistSession()
+    }
+
+    private var nextSequentialItem: UnifiedQueueItem? {
+        guard let currentIndex else { return nil }
+        if currentIndex + 1 < items.count { return items[currentIndex + 1] }
+        if repeatMode == .all { return items.first }
+        return nil
+    }
+
+    nonisolated static func spotifyPlaybackReachedEnd(
+        _ snapshot: SpotifyPlaybackSnapshot,
+        at date: Date
+    ) -> Bool {
+        guard snapshot.duration.isFinite, snapshot.duration > 0 else { return false }
+        return snapshot.effectiveProgress(at: date) >= snapshot.duration - 0.05
     }
 
     private func seekWhenPlaybackStarts(itemID: UUID, seconds: Double) {

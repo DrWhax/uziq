@@ -9,6 +9,10 @@ let package = Package(
     ],
     dependencies: [
         .package(
+            url: "https://github.com/jellyfin/jellyfin-sdk-swift.git",
+            exact: "3.0.0"
+        ),
+        .package(
             url: "https://github.com/Peter-Schorn/SpotifyAPI.git",
             revision: "610365935e4d1a5ce1f05e748600b3d793932abf"
         )
@@ -17,6 +21,7 @@ let package = Package(
         .executableTarget(
             name: "Uziq",
             dependencies: [
+                .product(name: "JellyfinAPI", package: "jellyfin-sdk-swift"),
                 .product(name: "SpotifyAPI", package: "SpotifyAPI")
             ],
             path: "Sources/Uziq",
@@ -29,7 +34,10 @@ let package = Package(
         ),
         .testTarget(
             name: "UziqTests",
-            dependencies: ["Uziq"],
+            dependencies: [
+                "Uziq",
+                .product(name: "JellyfinAPI", package: "jellyfin-sdk-swift")
+            ],
             path: "Tests/UziqTests"
         )
     ],

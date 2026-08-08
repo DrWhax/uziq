@@ -38,6 +38,8 @@ final class LibrespotService {
 
     var resolvedExecutableURL: URL? {
         let fileManager = FileManager.default
+        if let bundledExecutableURL { return bundledExecutableURL }
+
         if !executablePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let url = URL(fileURLWithPath: executablePath).standardizedFileURL
             if fileManager.isExecutableFile(atPath: url.path) { return url }
@@ -56,6 +58,20 @@ final class LibrespotService {
         return candidates.lazy
             .map { URL(fileURLWithPath: $0).standardizedFileURL }
             .first { fileManager.isExecutableFile(atPath: $0.path) }
+    }
+
+    var bundledExecutableURL: URL? {
+        let url = Bundle.main.bundleURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("Helpers", isDirectory: true)
+            .appendingPathComponent("librespot")
+            .standardizedFileURL
+        return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
+    }
+
+    var isUsingBundledExecutable: Bool {
+        guard let bundledExecutableURL, let resolvedExecutableURL else { return false }
+        return bundledExecutableURL == resolvedExecutableURL
     }
 
     func start(using _: PlaybackEngine) {

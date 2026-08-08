@@ -45,6 +45,31 @@ final class PlaybackQueueTests: XCTestCase {
         XCTAssertEqual(restored.source, .spotify)
     }
 
+    func testSpotifyQueueDetectsEndOfSingleTrackPlaybackRequest() {
+        let observedAt = Date(timeIntervalSince1970: 1_000)
+        let snapshot = SpotifyPlaybackSnapshot(
+            itemID: "track-123",
+            title: "A Track",
+            artist: "An Artist",
+            album: "An Album",
+            artworkURL: nil,
+            duration: 10,
+            progress: 8,
+            isPlaying: true,
+            deviceName: "Uziq",
+            observedAt: observedAt
+        )
+
+        XCTAssertFalse(PlaybackQueueStore.spotifyPlaybackReachedEnd(
+            snapshot,
+            at: observedAt.addingTimeInterval(1)
+        ))
+        XCTAssertTrue(PlaybackQueueStore.spotifyPlaybackReachedEnd(
+            snapshot,
+            at: observedAt.addingTimeInterval(2)
+        ))
+    }
+
     func testBandcampQueueItemRoundTripsWithPlayableResult() throws {
         let result = BandcampResult(
             id: "bandcamp-42",

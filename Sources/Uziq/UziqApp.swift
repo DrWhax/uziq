@@ -9,6 +9,7 @@ struct UziqApp: App {
     @State private var playback: PlaybackEngine
     @State private var bandcamp: BandcampStore
     @State private var spotify: SpotifyStore
+    @State private var jellyfin: JellyfinStore
     @State private var queue: PlaybackQueueStore
 
     init() {
@@ -17,6 +18,7 @@ struct UziqApp: App {
         _playback = State(initialValue: PlaybackEngine())
         _bandcamp = State(initialValue: BandcampStore())
         _spotify = State(initialValue: SpotifyStore())
+        _jellyfin = State(initialValue: JellyfinStore())
         _queue = State(initialValue: PlaybackQueueStore())
     }
 
@@ -27,6 +29,7 @@ struct UziqApp: App {
                 .environment(playback)
                 .environment(bandcamp)
                 .environment(spotify)
+                .environment(jellyfin)
                 .environment(queue)
                 .frame(minWidth: 980, minHeight: 640)
         }
@@ -73,6 +76,7 @@ struct UziqApp: App {
                 .environment(playback)
                 .environment(bandcamp)
                 .environment(spotify)
+                .environment(jellyfin)
                 .environment(queue)
         }
     }
@@ -99,8 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // opt into the regular application policy so WindowGroup is visible and
         // receives a Dock/menu-bar presence when started with `swift run`.
         NSApp.setActivationPolicy(.regular)
-        if let iconURL = Bundle.main.url(forResource: "logo", withExtension: "png")
-            ?? Bundle.module.url(forResource: "logo", withExtension: "png"),
+        if let iconURL = applicationIconURL,
            let icon = NSImage(contentsOf: iconURL) {
             NSApp.applicationIconImage = icon
         }
@@ -123,6 +126,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return event
         }
+    }
+
+    private var applicationIconURL: URL? {
+#if DEBUG
+        // `swift run` is not a packaged app. Read the repository's canonical
+        // artwork directly so replacing Images/logo.png takes effect on the
+        // next launch without maintaining a second copied resource by hand.
+        let projectRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let developmentIcon = projectRoot.appendingPathComponent("Images/logo.png")
+        if FileManager.default.fileExists(atPath: developmentIcon.path) {
+            return developmentIcon
+        }
+#endif
+        return Bundle.main.url(forResource: "logo", withExtension: "png")
+            ?? Bundle.module.url(forResource: "logo", withExtension: "png")
     }
 
     func applicationWillTerminate(_ notification: Notification) {

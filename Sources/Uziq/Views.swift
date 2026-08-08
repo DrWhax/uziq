@@ -7,6 +7,7 @@ struct ContentView: View {
     @Environment(PlaybackEngine.self) private var playback
     @Environment(BandcampStore.self) private var bandcamp
     @Environment(SpotifyStore.self) private var spotify
+    @Environment(JellyfinStore.self) private var jellyfin
     @Environment(PlaybackQueueStore.self) private var queue
     @State private var showingNowPlaying = false
     @State private var globalSearchText = ""
@@ -35,14 +36,10 @@ struct ContentView: View {
                 ScanStatusView(message: scanMessage)
             }
         }
-        .searchable(text: $globalSearchText, placement: .toolbar, prompt: "Search music")
-        .searchScopes($searchProvider) {
-            ForEach(SearchProvider.allCases) { provider in
-                Text(provider.title).tag(provider)
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                globalSearchField
             }
-        }
-        .onSubmit(of: .search) {
-            performGlobalSearch()
         }
         .onChange(of: globalSearchText) { _, newValue in
             guard searchProvider == .local else { return }
@@ -92,11 +89,67 @@ struct ContentView: View {
                 .environment(playback)
                 .environment(bandcamp)
                 .environment(spotify)
+                .environment(jellyfin)
                 .environment(queue)
         }
         .task {
-            queue.attach(library: library, playback: playback, bandcamp: bandcamp, spotify: spotify)
+            queue.attach(library: library, playback: playback, bandcamp: bandcamp, spotify: spotify, jellyfin: jellyfin)
             synchronizeSearchProvider()
+        }
+    }
+
+    private var globalSearchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+
+            TextField("Search", text: $globalSearchText)
+                .textFieldStyle(.plain)
+                .onSubmit { performGlobalSearch() }
+
+            if !globalSearchText.isEmpty {
+                Button { globalSearchText = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear search")
+            }
+
+            Divider()
+                .frame(height: 18)
+
+            Menu {
+                ForEach(SearchProvider.allCases) { provider in
+                    Button {
+                        searchProvider = provider
+                    } label: {
+                        if searchProvider == provider {
+                            Label(provider.title, systemImage: "checkmark")
+                        } else {
+                            Text(provider.title)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(searchProvider.title)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                }
+                .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Choose where Uziq searches")
+        }
+        .padding(.horizontal, 10)
+        .frame(width: 390, height: 30)
+        .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(.separator.opacity(0.45), lineWidth: 0.5)
         }
     }
 
@@ -104,6 +157,7 @@ struct ContentView: View {
         switch searchProvider {
         case .local:
             library.searchText = globalSearchText
+            library.selectedSection = .library
             Task { await library.refresh() }
         case .bandcamp:
             bandcamp.query = globalSearchText
@@ -113,6 +167,10 @@ struct ContentView: View {
             spotify.query = globalSearchText
             library.selectedSection = .spotify
             spotify.search()
+        case .jellyfin:
+            jellyfin.query = globalSearchText
+            library.selectedSection = .jellyfin
+            jellyfin.search()
         }
     }
 
@@ -124,6 +182,9 @@ struct ContentView: View {
         case .spotify:
             searchProvider = .spotify
             globalSearchText = spotify.query
+        case .jellyfin:
+            searchProvider = .jellyfin
+            globalSearchText = jellyfin.query
         case .settings:
             break
         default:
@@ -149,12 +210,12 @@ struct SidebarView: View {
                     Label(section.title, systemImage: section.systemImage).tag(section)
                 }
             }
-            Section {
-                ForEach([LibrarySection.bandcamp, .spotify], id: \.self) { section in
+            Section("External") {
+                ForEach([LibrarySection.bandcamp, .spotify, .jellyfin], id: \.self) { section in
                     Label(section.title, systemImage: section.systemImage).tag(section)
                 }
             }
-            Section {
+            Section("Uziq") {
                 Label(LibrarySection.settings.title, systemImage: LibrarySection.settings.systemImage)
                     .tag(LibrarySection.settings)
             }
@@ -185,6 +246,8 @@ struct LibraryContentView: View {
                 BandcampLibraryView()
             } else if library.selectedSection == .spotify {
                 SpotifyLibraryView()
+            } else if library.selectedSection == .jellyfin {
+                JellyfinLibraryView()
             } else if library.tracks.isEmpty && library.selectedSection != .mostPlayed {
                 EmptyLibraryView()
             } else {
@@ -205,6 +268,8 @@ struct LibraryContentView: View {
                     BandcampLibraryView()
                 case .spotify:
                     SpotifyLibraryView()
+                case .jellyfin:
+                    JellyfinLibraryView()
                 case .settings:
                     SettingsView()
                 }
@@ -439,7 +504,6 @@ struct AlbumsLibraryView: View {
 
 struct ArtistsLibraryView: View {
     @Environment(LibraryStore.self) private var library
-    @State private var selectedArtist: ArtistGroup?
 
     var body: some View {
         NavigationStack {
@@ -456,7 +520,9 @@ struct ArtistsLibraryView: View {
                                 spacing: 10
                             ) {
                                 ForEach(section.artists) { artist in
-                                    Button { selectedArtist = artist } label: {
+                                    NavigationLink {
+                                        ArtistDetailView(artist: artist)
+                                    } label: {
                                         ArtistRow(artist: artist, showDivider: false)
                                             .padding(.horizontal, 12)
                                             .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
@@ -468,14 +534,11 @@ struct ArtistsLibraryView: View {
                     }
                 }
                 .padding(28)
-        }
-        .navigationDestination(item: $selectedArtist) { artist in
-            ArtistDetailView(artist: artist)
-        }
-        .task {
-            await library.loadArtistArtwork()
-            library.refreshArtistArtworkIfNeeded()
-        }
+            }
+            .task {
+                await library.loadArtistArtwork()
+                library.refreshArtistArtworkIfNeeded()
+            }
         }
     }
 
@@ -1103,6 +1166,8 @@ struct NowPlayingView: View {
             ArtworkView(data: playback.currentTrack?.artworkData ?? queue.currentItem.flatMap(queue.localTrack(for:))?.artworkData)
         } else if queue.currentItem?.source == .spotify {
             SpotifyRemoteArtwork(url: spotify.playback?.artworkURL ?? queue.currentItem?.artworkURL, systemImage: "music.note")
+        } else if queue.currentItem?.source == .jellyfin {
+            ArtworkView(data: playback.currentTrack?.artworkData)
         } else {
             SpotifyRemoteArtwork(url: queue.currentItem?.artworkURL, systemImage: "dot.radiowaves.left.and.right")
         }
@@ -1214,7 +1279,21 @@ struct MiniPlayerView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(currentTitle).font(.headline).lineLimit(1)
                                 Text(currentArtist).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
-                                Text(currentAlbum).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+                                HStack(spacing: 7) {
+                                    Text(currentAlbum)
+                                        .lineLimit(1)
+                                    if let source = queue.currentItem?.source {
+                                        Label(source.title, systemImage: source.systemImage)
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                            .padding(.horizontal, 7)
+                                            .padding(.vertical, 3)
+                                            .background(.quaternary, in: Capsule())
+                                            .fixedSize()
+                                    }
+                                }
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
                             }
                         }
                         .frame(maxWidth: 320, alignment: .leading)
@@ -1229,7 +1308,10 @@ struct MiniPlayerView: View {
                                 .frame(width: 34, height: 34).background(.quaternary, in: Circle())
                         }
                         .buttonStyle(.plain)
-                        .disabled(playback.currentTrack == nil || queue.currentItem?.source == .spotify)
+                        .disabled(
+                            playback.currentTrack == nil ||
+                            (queue.currentItem?.source != .local && queue.currentItem?.source != .bandcamp)
+                        )
                         Button(action: onOpen) {
                             Image(systemName: "list.bullet.rectangle")
                                 .frame(width: 34, height: 34).background(.quaternary, in: Circle())
@@ -1251,6 +1333,8 @@ struct MiniPlayerView: View {
             ArtworkView(data: playback.currentTrack?.artworkData ?? queue.currentItem.flatMap(queue.localTrack(for:))?.artworkData)
         } else if queue.currentItem?.source == .spotify {
             SpotifyRemoteArtwork(url: spotify.playback?.artworkURL ?? queue.currentItem?.artworkURL, systemImage: "music.note")
+        } else if queue.currentItem?.source == .jellyfin {
+            ArtworkView(data: playback.currentTrack?.artworkData)
         } else {
             SpotifyRemoteArtwork(url: queue.currentItem?.artworkURL, systemImage: "dot.radiowaves.left.and.right")
         }
@@ -1496,6 +1580,10 @@ struct SettingsView: View {
     @Environment(PlaybackEngine.self) private var playback
     @Environment(BandcampStore.self) private var bandcamp
     @Environment(SpotifyStore.self) private var spotify
+    @Environment(JellyfinStore.self) private var jellyfin
+    @State private var bandcampPassword = ""
+    @State private var bandcampAuthCode = ""
+    @State private var jellyfinPassword = ""
 
     var body: some View {
         Form {
@@ -1557,7 +1645,121 @@ struct SettingsView: View {
                     }
                 }
                 .disabled(!playback.equalizerEnabled)
-                Text("Ten-band equalization is applied to local files and cached Bandcamp playback. Spotify uses librespot’s native CoreAudio output for stable streaming.")
+                Text("Ten-band equalization is applied to local files and cached Bandcamp and Jellyfin playback. Spotify uses librespot’s native CoreAudio output for stable streaming.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Jellyfin") {
+                VStack(alignment: .leading, spacing: 5) {
+                    Label("Self-hosted music", systemImage: "server.rack")
+                        .font(.headline)
+                    Text("Connect a Jellyfin account to browse, search, and play music from your server.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                TextField("Server URL (for example, http://jellyfin.local:8096)", text: Binding(
+                    get: { jellyfin.serverAddress },
+                    set: { jellyfin.serverAddress = $0 }
+                ))
+                .disabled(jellyfin.isConnected || jellyfin.isConnecting)
+                TextField("Username", text: Binding(
+                    get: { jellyfin.username },
+                    set: { jellyfin.username = $0 }
+                ))
+                .disabled(jellyfin.isConnected || jellyfin.isConnecting)
+
+                if jellyfin.isConnected {
+                    HStack {
+                        Label(
+                            "Connected to \(jellyfin.serverName ?? "Jellyfin") as \(jellyfin.profileName ?? jellyfin.username)",
+                            systemImage: "checkmark.circle.fill"
+                        )
+                        .foregroundStyle(.green)
+                        Spacer()
+                        Button("Disconnect", role: .destructive) { jellyfin.disconnect() }
+                    }
+                } else {
+                    SecureField("Password", text: $jellyfinPassword)
+                        .disabled(jellyfin.isConnecting)
+                    HStack {
+                        Button("Connect Jellyfin") { jellyfin.connect(password: jellyfinPassword) }
+                            .disabled(
+                                jellyfin.isConnecting || jellyfin.serverAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                                jellyfin.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || jellyfinPassword.isEmpty
+                            )
+                        if jellyfin.isConnecting { ProgressView().controlSize(.small) }
+                    }
+                }
+                if let error = jellyfin.error {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+                }
+                Text("Your password is never stored. Jellyfin’s access token is kept in the macOS Keychain.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Bandcamp") {
+                VStack(alignment: .leading, spacing: 5) {
+                    Label("Fan account", systemImage: "person.crop.circle")
+                        .font(.headline)
+                    Text("Connect your Bandcamp account to use authenticated high-quality streams for music you own.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                TextField("Bandcamp email", text: Binding(
+                    get: { bandcamp.accountEmail },
+                    set: { bandcamp.accountEmail = $0 }
+                ))
+                .textContentType(.emailAddress)
+                .disabled(bandcamp.isAuthenticated || bandcamp.isAuthenticating)
+
+                if bandcamp.isAuthenticated {
+                    HStack {
+                        Label(
+                            bandcamp.authStatusMessage ?? "Connected as \(bandcamp.accountEmail)",
+                            systemImage: "checkmark.circle.fill"
+                        )
+                        .foregroundStyle(.green)
+                        Spacer()
+                        Button("Disconnect", role: .destructive) { bandcamp.signOut() }
+                    }
+                } else {
+                    SecureField("Bandcamp password", text: $bandcampPassword)
+                        .textContentType(.password)
+                        .disabled(bandcamp.isAuthenticating)
+                    SecureField("Two-factor code (if enabled)", text: $bandcampAuthCode)
+                        .disabled(bandcamp.isAuthenticating)
+                    HStack {
+                        Button(bandcamp.authRequiresRetry ? "Connect Again" : "Connect Bandcamp Account") {
+                            bandcamp.signIn(password: bandcampPassword, authCode: bandcampAuthCode)
+                        }
+                        .disabled(
+                            bandcamp.isAuthenticating ||
+                            bandcamp.accountEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                            bandcampPassword.isEmpty
+                        )
+                        if bandcamp.isAuthenticating {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
+                }
+
+                if let error = bandcamp.authError {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                }
+                if bandcamp.authRequiresRetry {
+                    Label(
+                        "Bandcamp may have emailed you to approve this login. Open that email and confirm the sign-in, then return here and click Connect Again.",
+                        systemImage: "envelope.badge"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                }
+                Text("Your password is sent directly to Bandcamp for login and is never stored. OAuth access and refresh tokens are kept in the macOS Keychain. Unowned releases continue using their normal artist-enabled preview streams.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1585,6 +1787,23 @@ struct SettingsView: View {
                 Text("Bandcamp audio that has not been played for seven days is removed automatically. Cleanup runs when Uziq starts and once per day while it remains open.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                Divider()
+                HStack {
+                    Label("Jellyfin audio", systemImage: "server.rack")
+                    Spacer()
+                    Text(jellyfinCacheSummary).foregroundStyle(.secondary).monospacedDigit()
+                }
+                HStack {
+                    Button("Clean Up Jellyfin Cache") { jellyfin.cleanUpCache() }
+                        .disabled(jellyfin.isCleaningCache)
+                    if jellyfin.isCleaningCache { ProgressView().controlSize(.small) }
+                }
+                if let message = jellyfin.cacheMessage {
+                    Text(message).font(.caption).foregroundStyle(.secondary)
+                }
+                Text("Jellyfin tracks are cached for AVFoundation playback and equalization, then removed after seven days without use.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("Spotify") {
                 VStack(alignment: .leading, spacing: 5) {
@@ -1632,12 +1851,29 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                HStack {
-                    TextField("librespot executable", text: Binding(
-                        get: { spotify.librespot.executablePath },
-                        set: { spotify.librespot.executablePath = $0 }
-                    ))
-                    Button("Choose…") { chooseLibrespotExecutable() }
+                if spotify.librespot.isUsingBundledExecutable {
+                    Label("Playback engine bundled with Uziq", systemImage: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
+                } else if let executable = spotify.librespot.resolvedExecutableURL {
+                    Label("Playback engine found automatically", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text(executable.path)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                } else {
+                    Label("Playback engine not found", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                }
+
+                DisclosureGroup("Use a custom librespot binary") {
+                    HStack {
+                        TextField("librespot executable", text: Binding(
+                            get: { spotify.librespot.executablePath },
+                            set: { spotify.librespot.executablePath = $0 }
+                        ))
+                        Button("Choose…") { chooseLibrespotExecutable() }
+                    }
                 }
                 HStack {
                     Label(spotify.librespot.status.title, systemImage: spotify.librespot.status.isRunning ? "wave.3.right.circle.fill" : "wave.3.right.circle")
@@ -1650,7 +1886,9 @@ struct SettingsView: View {
                             .disabled(spotify.librespot.resolvedExecutableURL == nil)
                     }
                 }
-                Text("Install the lightweight playback engine with `cargo install librespot --version 0.8.0`. Its first start opens a separate Spotify login. Spotify uses librespot’s native output for reliable buffering and track changes; audio caching is disabled.")
+                Text(spotify.librespot.isUsingBundledExecutable
+                    ? "No separate installation is needed. Its first start opens a separate Spotify login; afterward Uziq reuses the credential from Application Support. Audio caching is disabled."
+                    : "Development builds find librespot in Homebrew, Cargo, or the custom path above. Install it with `cargo install librespot --version 0.8.0 --locked`. Packaged Uziq builds include the helper automatically.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
@@ -1681,6 +1919,14 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .padding(24)
         .frame(maxWidth: 720)
+        .onChange(of: bandcamp.isAuthenticated) { _, connected in
+            guard connected else { return }
+            bandcampPassword = ""
+            bandcampAuthCode = ""
+        }
+        .onChange(of: jellyfin.isConnected) { _, connected in
+            if connected { jellyfinPassword = "" }
+        }
     }
 
     private func equalizerFrequencyLabel(_ frequency: Float) -> String {
@@ -1692,6 +1938,11 @@ struct SettingsView: View {
     private var cacheSummary: String {
         let size = ByteCountFormatter.string(fromByteCount: bandcamp.cacheBytes, countStyle: .file)
         return "\(size) · \(bandcamp.cachedFileCount) \(bandcamp.cachedFileCount == 1 ? "file" : "files")"
+    }
+
+    private var jellyfinCacheSummary: String {
+        let size = ByteCountFormatter.string(fromByteCount: jellyfin.cacheBytes, countStyle: .file)
+        return "\(size) · \(jellyfin.cachedFileCount) \(jellyfin.cachedFileCount == 1 ? "file" : "files")"
     }
 
     private func chooseLibrespotExecutable() {

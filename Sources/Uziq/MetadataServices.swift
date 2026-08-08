@@ -719,7 +719,7 @@ struct BandcampClient: BandcampProvider, Sendable {
     }
 
     private func resolvedArtworkURL(_ raw: [String: Any]) -> URL? {
-        if let url = resolvedURL(firstString(raw, keys: ["art_url", "artwork_url", "image_url"])) { return url }
+        if let url = resolvedURL(firstString(raw, keys: ["img", "art_url", "artwork_url", "image_url"])) { return url }
         guard let artID = string(raw["art_id"]) ?? string(raw["art_ids"]) else { return nil }
         return URL(string: "https://f4.bcbits.com/img/a\(artID)_16.jpg")
     }

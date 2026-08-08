@@ -4,6 +4,7 @@ import XCTest
 final class SpotifyTests: XCTestCase {
     func testArtistCatalogRequestsRespectDevelopmentModeLimits() {
         XCTAssertEqual(SpotifyStore.artistAlbumsPageLimit, 10)
+        XCTAssertEqual(SpotifyStore.albumTracksPageLimit, 50)
         XCTAssertEqual(
             SpotifyStore.artistRadioSearchQuery(for: "Artist \"Name\""),
             "artist:\"Artist \\\"Name\\\"\""
@@ -58,7 +59,30 @@ final class SpotifyTests: XCTestCase {
     }
 
     func testSpotifySearchScopesAreExplicit() {
-        XCTAssertEqual(SearchProvider.allCases.map(\.title), ["Local", "Bandcamp", "Spotify"])
+        XCTAssertEqual(SearchProvider.allCases.map(\.title), ["My Library", "Bandcamp", "Spotify", "Jellyfin"])
+    }
+
+    func testPKCERefreshKeepsExistingRefreshTokenWhenSpotifyOmitsReplacement() throws {
+        let response = #"{"access_token":"new-access","expires_in":3600}"#.data(using: .utf8)!
+        let normalized = UziqSpotifyPKCEBackend.retainingRefreshToken(
+            in: response,
+            fallback: "existing-refresh"
+        )
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: normalized) as? [String: Any])
+
+        XCTAssertEqual(json["access_token"] as? String, "new-access")
+        XCTAssertEqual(json["refresh_token"] as? String, "existing-refresh")
+    }
+
+    func testPKCERefreshPreservesRotatedRefreshToken() throws {
+        let response = #"{"access_token":"new-access","refresh_token":"rotated-refresh","expires_in":3600}"#.data(using: .utf8)!
+        let normalized = UziqSpotifyPKCEBackend.retainingRefreshToken(
+            in: response,
+            fallback: "existing-refresh"
+        )
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: normalized) as? [String: Any])
+
+        XCTAssertEqual(json["refresh_token"] as? String, "rotated-refresh")
     }
 
     func testSpotifyPlaybackProgressAdvancesFromObservationTime() {

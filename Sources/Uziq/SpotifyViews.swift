@@ -23,6 +23,8 @@ struct SpotifyLibraryView: View {
                         detail: "Sign in with PKCE to load your playlists and search Spotify's catalog. Your client secret is not needed.",
                         buttonTitle: "Connect Account"
                     ) { spotify.logIn() }
+                } else if let selectedAlbum = spotify.selectedAlbum {
+                    SpotifyAlbumDetail(album: selectedAlbum)
                 } else if let selectedArtist = spotify.selectedArtist {
                     SpotifyArtistDetail(artist: selectedArtist)
                 } else if let selectedPlaylist = spotify.selectedPlaylist {
@@ -34,7 +36,7 @@ struct SpotifyLibraryView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .overlay(alignment: .topTrailing) {
-            if spotify.isLoading || spotify.isLoadingArtist {
+            if spotify.isLoading || spotify.isLoadingArtist || spotify.isLoadingAlbum {
                 ProgressView()
                     .controlSize(.small)
                     .padding(.top, 34)
@@ -57,7 +59,7 @@ struct SpotifyLibraryView: View {
             }
             Spacer()
             if spotify.isAuthorized {
-                if spotify.selectedPlaylist != nil || spotify.selectedArtist != nil {
+                if spotify.selectedPlaylist != nil || spotify.selectedArtist != nil || spotify.selectedAlbum != nil {
                     Button { spotify.closeDetail() } label: {
                         Label("Spotify Home", systemImage: "house.fill")
                     }
@@ -133,21 +135,31 @@ private struct SpotifyBrowseView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Your Library")
                             .font(.title2.weight(.bold))
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 190), spacing: 16)], spacing: 18) {
-                            if spotify.likedSongsTotal > 0 {
-                                SpotifyPlaylistTile(
-                                    item: spotify.likedSongsCollection,
-                                    systemImage: "heart.fill"
-                                ) {
-                                    spotify.openLikedSongs()
+                        Text("Liked songs and playlists from your Spotify account.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            LazyHStack(alignment: .top, spacing: 14) {
+                                if spotify.likedSongsTotal > 0 {
+                                    SpotifyPlaylistTile(
+                                        item: spotify.likedSongsCollection,
+                                        systemImage: "heart.fill",
+                                        isPreparing: spotify.isStartingPlayback,
+                                        onOpen: { spotify.openLikedSongs() },
+                                        onPlay: { playLibraryItem(spotify.likedSongsCollection) }
+                                    )
                                 }
-                            }
-                            ForEach(spotify.playlists) { playlist in
-                                SpotifyPlaylistTile(item: playlist) {
-                                    spotify.openPlaylist(playlist)
+                                ForEach(spotify.playlists) { playlist in
+                                    SpotifyPlaylistTile(
+                                        item: playlist,
+                                        isPreparing: spotify.isStartingPlayback,
+                                        onOpen: { spotify.openPlaylist(playlist) },
+                                        onPlay: { playLibraryItem(playlist) }
+                                    )
                                 }
                             }
                         }
+                        .frame(height: 190)
                     }
                 }
 
@@ -193,6 +205,14 @@ private struct SpotifyBrowseView: View {
         !spotify.searchTracks.isEmpty || !spotify.searchAlbums.isEmpty ||
             !spotify.searchArtists.isEmpty || !spotify.searchPlaylists.isEmpty
     }
+
+    private func playLibraryItem(_ item: SpotifyCatalogItem) {
+        if item.id == SpotifyStore.likedSongsID, let first = spotify.likedSongs.first {
+            queue.replace(with: first, context: spotify.likedSongs)
+        } else {
+            queue.replace(with: item)
+        }
+    }
 }
 
 private struct SpotifyResultSection: View {
@@ -213,8 +233,10 @@ private struct SpotifyResultSection: View {
                             spotify.openPlaylist(item)
                         } else if item.kind == .artist {
                             spotify.openArtist(item)
+                        } else if item.kind == .album {
+                            spotify.openAlbum(item)
                         } else {
-                            queue.replace(with: item)
+                            queue.replace(with: item, context: items)
                         }
                     }
                     Divider()
@@ -225,27 +247,71 @@ private struct SpotifyResultSection: View {
 }
 
 private struct SpotifyPlaylistTile: View {
+    @Environment(PlaybackQueueStore.self) private var queue
     let item: SpotifyCatalogItem
     var systemImage = "rectangle.stack.fill"
-    let action: () -> Void
+    let isPreparing: Bool
+    let onOpen: () -> Void
+    let onPlay: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 9) {
-                SpotifyRemoteArtwork(url: item.artworkURL, systemImage: systemImage)
-                    .aspectRatio(1, contentMode: .fit)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                Text(item.name)
-                    .font(.headline)
-                    .lineLimit(1)
-                Text(item.itemCount.map { "\($0) items" } ?? item.subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack(alignment: .bottomTrailing) {
+                Button(action: onOpen) {
+                    SpotifyRemoteArtwork(url: item.artworkURL, systemImage: systemImage)
+                        .frame(width: 142, height: 142)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+
+                Button(action: onPlay) {
+                    Group {
+                        if isPreparing {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(.white)
+                        } else {
+                            Image(systemName: "play.fill")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .frame(width: 30, height: 30)
+                .background(.black.opacity(0.65), in: Circle())
+                .padding(8)
+                .disabled(isPreparing || (item.id != SpotifyStore.likedSongsID && item.uri.isEmpty))
+                .help("Play \(item.name)")
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button(action: onOpen) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.name)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text(item.itemCount.map { "\($0) items" } ?? item.subtitle)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.primary.opacity(0.72))
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
+        .frame(width: 142, alignment: .leading)
+        .contextMenu {
+            Button("View Track List", action: onOpen)
+            Button("Play", action: onPlay)
+            if item.id != SpotifyStore.likedSongsID, !item.uri.isEmpty {
+                Button("Play Next") { queue.playNext(item) }
+                Button("Add to Queue") { queue.add(item) }
+            }
+            if let url = spotifyWebURL(for: item.uri) {
+                Button("Open in Spotify", action: { NSWorkspace.shared.open(url) })
+            }
+        }
     }
 }
 
@@ -299,12 +365,12 @@ private struct SpotifyResultRow: View {
                 .foregroundStyle(.tertiary)
             }
             Spacer()
-            if item.kind == .playlist || item.kind == .artist {
+            if item.kind == .playlist || item.kind == .artist || item.kind == .album {
                 Button("View", action: primaryAction)
                     .buttonStyle(.bordered)
             }
             Button {
-                if item.kind == .playlist || item.kind == .artist {
+                if item.kind == .playlist || item.kind == .artist || item.kind == .album {
                     queue.replace(with: item)
                 } else {
                     primaryAction()
@@ -485,17 +551,18 @@ private struct SpotifyArtistDetail: View {
 }
 
 private struct SpotifyArtistAlbumTile: View {
+    @Environment(SpotifyStore.self) private var spotify
     @Environment(PlaybackQueueStore.self) private var queue
     let album: SpotifyCatalogItem
 
     var body: some View {
-        Button { queue.replace(with: album) } label: {
+        Button { spotify.openAlbum(album) } label: {
             VStack(alignment: .leading, spacing: 9) {
                 ZStack(alignment: .bottomTrailing) {
                     SpotifyRemoteArtwork(url: album.artworkURL, systemImage: "square.stack")
                         .aspectRatio(1, contentMode: .fit)
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    Image(systemName: "play.fill")
+                    Image(systemName: "chevron.right")
                         .foregroundStyle(.white)
                         .frame(width: 34, height: 34)
                         .background(Color.accentColor, in: Circle())
@@ -513,9 +580,115 @@ private struct SpotifyArtistAlbumTile: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button("Play Next") { queue.playNext(album) }
-            Button("Add to Queue") { queue.add(album) }
+            Button("Play Album") { queue.replace(with: album) }
+            Button("Play Album Next") { queue.playNext(album) }
+            Button("Add Album to Queue") { queue.add(album) }
         }
+    }
+}
+
+private struct SpotifyAlbumDetail: View {
+    @Environment(SpotifyStore.self) private var spotify
+    @Environment(PlaybackQueueStore.self) private var queue
+    let album: SpotifyCatalogItem
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                SpotifyPlaybackNotice()
+
+                HStack(spacing: 22) {
+                    SpotifyRemoteArtwork(url: album.artworkURL, systemImage: "square.stack")
+                        .frame(width: 180, height: 180)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .shadow(color: .black.opacity(0.2), radius: 14, y: 7)
+                    VStack(alignment: .leading, spacing: 9) {
+                        Button { spotify.closeAlbum() } label: {
+                            Label(
+                                spotify.selectedArtist == nil ? "Back to Spotify" : "Back to Artist",
+                                systemImage: "chevron.left"
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        Text("Album")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(album.name)
+                            .font(.system(size: 34, weight: .bold, design: .rounded))
+                        Text(album.subtitle)
+                            .foregroundStyle(.secondary)
+                        Text(albumTrackSummary)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button(action: playAlbum) {
+                                Label("Play Album", systemImage: "play.fill")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(spotify.isLoadingAlbum || spotify.albumTracks.isEmpty)
+
+                            Button("Open in Spotify") {
+                                if let url = spotifyWebURL(for: album.uri) {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                }
+
+                if spotify.isLoadingAlbum && spotify.albumTracks.isEmpty {
+                    ProgressView("Loading tracks…")
+                        .frame(maxWidth: .infinity, minHeight: 180)
+                } else if let error = spotify.albumTracksError {
+                    ContentUnavailableView(
+                        "Couldn’t load album tracks",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text(error)
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 220)
+                } else if spotify.albumTracks.isEmpty {
+                    ContentUnavailableView(
+                        "No tracks available",
+                        systemImage: "music.note.slash",
+                        description: Text("Spotify did not return playable tracks for this album.")
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 220)
+                } else {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(spotify.albumTracks.enumerated()), id: \.element.id) { index, track in
+                            HStack(spacing: 12) {
+                                Text("\(index + 1)")
+                                    .font(.callout.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 28, alignment: .trailing)
+                                SpotifyResultRow(item: track) {
+                                    queue.replace(with: track, context: spotify.albumTracks)
+                                }
+                            }
+                            Divider()
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 28)
+            .padding(.bottom, 32)
+        }
+    }
+
+    private var albumTrackSummary: String {
+        let count = spotify.albumTracks.isEmpty ? album.itemCount : spotify.albumTracks.count
+        let countText = count.map { "\($0) track\($0 == 1 ? "" : "s")" } ?? "Album"
+        let durationMS = spotify.albumTracks.compactMap(\.durationMS).reduce(0, +)
+        guard durationMS > 0 else { return countText }
+        let totalMinutes = durationMS / 60_000
+        return "\(countText) · \(totalMinutes) min"
+    }
+
+    private func playAlbum() {
+        guard let first = spotify.albumTracks.first else { return }
+        queue.replace(with: first, context: spotify.albumTracks)
     }
 }
 

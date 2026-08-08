@@ -10,6 +10,7 @@ final class SpotifyStore {
     static let redirectURI = SpotifyLoopbackServer.callbackURL
     static let likedSongsID = "uziq:spotify:liked-songs"
     nonisolated static let artistAlbumsPageLimit = 10
+    nonisolated static let albumTracksPageLimit = 50
 
     nonisolated static func artistRadioSearchQuery(for artistName: String) -> String {
         let escaped = artistName
@@ -45,6 +46,10 @@ final class SpotifyStore {
     private(set) var artistAlbumsError: String?
     private(set) var artistRadioError: String?
     private(set) var isLoadingArtist = false
+    private(set) var selectedAlbum: SpotifyCatalogItem?
+    private(set) var albumTracks: [SpotifyCatalogItem] = []
+    private(set) var albumTracksError: String?
+    private(set) var isLoadingAlbum = false
     private(set) var playback: SpotifyPlaybackSnapshot?
     private(set) var isLoading = false
     private(set) var isStartingPlayback = false
@@ -53,7 +58,7 @@ final class SpotifyStore {
     var error: String?
     let librespot = LibrespotService()
 
-    @ObservationIgnored private var api: SpotifyAPI<AuthorizationCodeFlowPKCEManager>
+    @ObservationIgnored private var api: SpotifyAPI<UziqSpotifyAuthorizationManager>
     @ObservationIgnored private var cancellables = Set<AnyCancellable>()
     @ObservationIgnored private let loopbackServer = SpotifyLoopbackServer()
     @ObservationIgnored private var codeVerifier: String?
@@ -62,6 +67,7 @@ final class SpotifyStore {
     @ObservationIgnored private var desiredVolume: Float = 1
     @ObservationIgnored private var playbackGeneration = UUID()
     @ObservationIgnored private var artistLoadGeneration = UUID()
+    @ObservationIgnored private var albumLoadGeneration = UUID()
     @ObservationIgnored private var artistTopTracksFinished = false
     @ObservationIgnored private var artistAlbumsFinished = false
     @ObservationIgnored private var playbackTick = 0
@@ -87,8 +93,10 @@ final class SpotifyStore {
         let clientID = UserDefaults.standard.string(forKey: "spotify-client-id") ?? ""
         self.clientID = clientID
         api = SpotifyAPI(
-            authorizationManager: AuthorizationCodeFlowPKCEManager(
-                clientId: clientID.trimmingCharacters(in: .whitespacesAndNewlines)
+            authorizationManager: UziqSpotifyAuthorizationManager(
+                backend: UziqSpotifyPKCEBackend(
+                    clientId: clientID.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
             )
         )
         configureAPISubscriptions()
@@ -203,6 +211,7 @@ final class SpotifyStore {
     func logOut() {
         api.authorizationManager.deauthorize()
         SpotifyKeychain.remove(authorizationKey)
+        closeDetail()
         isAuthorized = false
         profileName = nil
         playlists = []
@@ -253,6 +262,7 @@ final class SpotifyStore {
             error = "Connect your Spotify account before searching."
             return
         }
+        closeDetail()
         guard !normalized.isEmpty else {
             clearSearch()
             return
@@ -274,7 +284,7 @@ final class SpotifyStore {
             }
         } receiveValue: { [weak self] result in
             guard let self else { return }
-            searchTracks = result.tracks?.items.map(Self.catalogItem) ?? []
+            searchTracks = result.tracks?.items.map { Self.catalogItem($0) } ?? []
             searchAlbums = result.albums?.items.map(Self.catalogItem) ?? []
             searchArtists = result.artists?.items.map(Self.catalogItem) ?? []
             searchPlaylistsWithCurrentToken(query: normalized)
@@ -283,6 +293,7 @@ final class SpotifyStore {
     }
 
     func openPlaylist(_ playlist: SpotifyCatalogItem) {
+        closeAlbum()
         closeArtist()
         selectedPlaylist = playlist
         playlistTracks = []
@@ -316,6 +327,7 @@ final class SpotifyStore {
 
     func openArtist(_ artist: SpotifyCatalogItem) {
         guard artist.kind == .artist, !artist.uri.isEmpty else { return }
+        closeAlbum()
         closePlaylist()
         selectedArtist = artist
         artistAlbums = []
@@ -344,7 +356,7 @@ final class SpotifyStore {
                 }
             } receiveValue: { [weak self] result in
                 guard let self, artistLoadGeneration == generation else { return }
-                artistTopTracks = result.tracks?.items.map(Self.catalogItem) ?? []
+                artistTopTracks = result.tracks?.items.map { Self.catalogItem($0) } ?? []
             }
             .store(in: &cancellables)
     }
@@ -359,7 +371,28 @@ final class SpotifyStore {
         isLoadingArtist = false
     }
 
+    func openAlbum(_ album: SpotifyCatalogItem) {
+        guard album.kind == .album, !album.uri.isEmpty else { return }
+        closePlaylist()
+        selectedAlbum = album
+        albumTracks = []
+        albumTracksError = nil
+        isLoadingAlbum = true
+        let generation = UUID()
+        albumLoadGeneration = generation
+        loadAlbumTracks(album, offset: 0, accumulated: [], generation: generation)
+    }
+
+    func closeAlbum() {
+        albumLoadGeneration = UUID()
+        selectedAlbum = nil
+        albumTracks = []
+        albumTracksError = nil
+        isLoadingAlbum = false
+    }
+
     func closeDetail() {
+        closeAlbum()
         closePlaylist()
         closeArtist()
     }
@@ -519,7 +552,9 @@ final class SpotifyStore {
     private func rebuildAPI(clientID: String) {
         cancellables.removeAll()
         api = SpotifyAPI(
-            authorizationManager: AuthorizationCodeFlowPKCEManager(clientId: clientID)
+            authorizationManager: UziqSpotifyAuthorizationManager(
+                backend: UziqSpotifyPKCEBackend(clientId: clientID)
+            )
         )
         isAuthorized = false
         profileName = nil
@@ -555,12 +590,38 @@ final class SpotifyStore {
     private func restoreAuthorization() {
         guard !clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let data = SpotifyKeychain.read(authorizationKey),
-              let manager = try? JSONDecoder().decode(AuthorizationCodeFlowPKCEManager.self, from: data),
+              let manager = try? JSONDecoder().decode(UziqSpotifyAuthorizationManager.self, from: data),
               manager.clientId == clientID.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
         api.authorizationManager = manager
         isAuthorized = manager.isAuthorized()
         needsPersonalLibraryPermission = isAuthorized && !manager.isAuthorized(for: requiredScopes)
-        if isAuthorized { loadAccount() }
+        if isAuthorized {
+            loadAccount()
+        } else if manager.refreshToken != nil {
+            refreshRestoredAuthorization(using: manager)
+        }
+    }
+
+    private func refreshRestoredAuthorization(using manager: UziqSpotifyAuthorizationManager) {
+        isLoading = true
+        error = nil
+        manager.refreshTokens(onlyIfExpired: true)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] completion in
+                guard let self else { return }
+                if case .failure(let error) = completion {
+                    isLoading = false
+                    isAuthorized = false
+                    self.error = "Could not refresh the Spotify session: \(error.localizedDescription)"
+                }
+            } receiveValue: { [weak self] in
+                guard let self else { return }
+                isLoading = false
+                isAuthorized = manager.isAuthorized()
+                needsPersonalLibraryPermission = isAuthorized && !manager.isAuthorized(for: requiredScopes)
+                if isAuthorized { loadAccount() }
+            }
+            .store(in: &cancellables)
     }
 
     private func loadPersonalLibrary() {
@@ -611,6 +672,45 @@ final class SpotifyStore {
                 artistAlbums = combined.filter { seen.insert($0.id).inserted }
                 artistAlbumsFinished = true
                 finishArtistLoadingIfReady()
+            }
+        }
+        .store(in: &cancellables)
+    }
+
+    private func loadAlbumTracks(
+        _ album: SpotifyCatalogItem,
+        offset: Int,
+        accumulated: [SpotifyCatalogItem],
+        generation: UUID
+    ) {
+        api.albumTracks(
+            album.uri,
+            market: "from_token",
+            limit: Self.albumTracksPageLimit,
+            offset: offset
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] completion in
+            guard let self, albumLoadGeneration == generation else { return }
+            if case .failure(let error) = completion {
+                isLoadingAlbum = false
+                albumTracksError = error.localizedDescription
+            }
+        } receiveValue: { [weak self] page in
+            guard let self, albumLoadGeneration == generation else { return }
+            let combined = accumulated + page.items.map {
+                Self.catalogItem($0, fallbackArtworkURL: album.artworkURL)
+            }
+            if !page.items.isEmpty, combined.count < page.total {
+                loadAlbumTracks(
+                    album,
+                    offset: offset + page.items.count,
+                    accumulated: combined,
+                    generation: generation
+                )
+            } else {
+                albumTracks = combined
+                isLoadingAlbum = false
             }
         }
         .store(in: &cancellables)
@@ -816,14 +916,17 @@ final class SpotifyStore {
             .store(in: &cancellables)
     }
 
-    private static func catalogItem(_ track: SpotifyWebAPI.Track) -> SpotifyCatalogItem {
+    private static func catalogItem(
+        _ track: SpotifyWebAPI.Track,
+        fallbackArtworkURL: URL? = nil
+    ) -> SpotifyCatalogItem {
         SpotifyCatalogItem(
             id: track.id ?? track.uri ?? UUID().uuidString,
             name: track.name,
             subtitle: track.artists?.map(\.name).joined(separator: ", ") ?? "Unknown Artist",
             uri: track.uri ?? "",
             kind: .track,
-            artworkURL: track.album?.images?.first?.url,
+            artworkURL: track.album?.images?.first?.url ?? fallbackArtworkURL,
             durationMS: track.durationMS,
             itemCount: nil
         )

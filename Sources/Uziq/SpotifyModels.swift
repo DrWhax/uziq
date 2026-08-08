@@ -4,14 +4,16 @@ enum SearchProvider: String, CaseIterable, Identifiable {
     case local
     case bandcamp
     case spotify
+    case jellyfin
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .local: "Local"
+        case .local: "My Library"
         case .bandcamp: "Bandcamp"
         case .spotify: "Spotify"
+        case .jellyfin: "Jellyfin"
         }
     }
 }
