@@ -42,7 +42,7 @@ final class PlaybackEngine {
 
     var currentTrack: Track?
     var isPlaying = false
-    var currentTime = 0.0
+    @ObservationIgnored var currentTime = 0.0
     var duration = 0.0
     var volume: Float = 1.0 {
         didSet {
@@ -119,7 +119,10 @@ final class PlaybackEngine {
         applyEqualizerSettings()
         try? startAudioEngine()
 
-        progressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        // Track transitions are driven by AVAudioPlayerNode's completion callback.
+        // A one-second poll is sufficient for prefetching and internal position
+        // bookkeeping; the waveform has its own deliberately slower cadence.
+        progressTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.updateProgress() }
         }
         toggleObserver = NotificationCenter.default.addObserver(
@@ -488,7 +491,8 @@ final class PlaybackEngine {
             let absoluteFrame = min(totalFrames, startingFrame + renderedFrame)
             currentTime = sampleRate > 0 ? Double(absoluteFrame) / sampleRate : 0
         }
-        isPlaying = playerNode.isPlaying
+        let playerIsPlaying = playerNode.isPlaying
+        if isPlaying != playerIsPlaying { isPlaying = playerIsPlaying }
         if duration > 0, duration - currentTime <= 20 {
             prefetchNextTrackIfNeeded()
         }

@@ -1392,7 +1392,7 @@ private struct PlayerTimeline: View {
     var body: some View {
         Group {
             if shouldAnimate {
-                TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
+                TimelineView(.periodic(from: .now, by: 5)) { timeline in
                     timelineContent(at: timeline.date)
                 }
             } else {

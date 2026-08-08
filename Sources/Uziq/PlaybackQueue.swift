@@ -162,6 +162,7 @@ final class PlaybackQueueStore {
     @ObservationIgnored private var persistTimer: Timer?
     @ObservationIgnored private var spotifyPlaybackSeen = false
     @ObservationIgnored private var jellyfinPrefetchedItemID: String?
+    @ObservationIgnored private var lastPositionCheckpoint = Date.distantPast
     @ObservationIgnored private var isDispatching = false
     @ObservationIgnored private var isRestoringSession = false
     @ObservationIgnored private let sessionURLOverride: URL?
@@ -523,9 +524,12 @@ final class PlaybackQueueStore {
             jellyfinPrefetchedItemID = jellyfinItem.id
             jellyfin?.prefetch(jellyfinItem)
         }
-        // Structural queue changes persist immediately. This timer only needs to
-        // checkpoint a position while audio is advancing.
-        if isPlaying { persistSession() }
+        // Structural queue changes persist immediately. During playback, a
+        // 15-second crash-recovery checkpoint avoids repeatedly encoding and
+        // atomically rewriting a potentially large queue.
+        if isPlaying, Date.now.timeIntervalSince(lastPositionCheckpoint) >= 15 {
+            persistSession()
+        }
     }
 
     private var nextSequentialItem: UnifiedQueueItem? {
@@ -602,6 +606,11 @@ final class PlaybackQueueStore {
             volume: volume
         )
         guard let data = try? JSONEncoder().encode(session) else { return }
-        try? data.write(to: sessionURL, options: .atomic)
+        do {
+            try data.write(to: sessionURL, options: .atomic)
+            lastPositionCheckpoint = .now
+        } catch {
+            // Playback persistence is best-effort; playback itself must continue.
+        }
     }
 }
