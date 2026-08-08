@@ -143,7 +143,7 @@ final class NowPlayingController {
         guard artwork == nil, let url = snapshot.artworkURL else { return }
         let itemID = snapshot.itemID
         artworkTask = Task { [weak self] in
-            guard let (data, _) = try? await URLSession.shared.data(from: url),
+            guard let data = await RemoteArtworkCache.shared.data(for: url),
                   !Task.isCancelled,
                   let image = NSImage(data: data),
                   let self,

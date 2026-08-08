@@ -39,7 +39,6 @@ final class LibraryStore {
     @ObservationIgnored private let scanner = LibraryScanner()
     @ObservationIgnored private let bookmarks = BookmarkStore()
     @ObservationIgnored private let matcher = MetadataMatcher(fingerprintProvider: FpcalcFingerprintProvider())
-    @ObservationIgnored private let artworkEnricher = AlbumArtworkEnricher()
     @ObservationIgnored private var artworkTask: Task<Void, Never>?
     @ObservationIgnored private var artistArtworkTask: Task<Void, Never>?
     @ObservationIgnored private var playObserver: NSObjectProtocol?
@@ -105,7 +104,9 @@ final class LibraryStore {
     func scan() {
         guard !isScanning else { return }
         guard !folderRoots.isEmpty else {
-            scanMessage = "No library folders added"
+            scanMessage = tracks.isEmpty
+                ? "No library folders added"
+                : "The existing index has no active folder access. Re-add its parent music folders in Settings."
             return
         }
         isScanning = true
@@ -142,7 +143,9 @@ final class LibraryStore {
         guard artworkTask == nil, !isScanning else { return }
         artworkTask = Task { [weak self] in
             guard let self else { return }
-            let allTracks = (try? await database.fetchTracks()) ?? []
+            // Reuse the current snapshot so embedded artwork buffers stay shared. A fresh
+            // database fetch can otherwise duplicate the entire artwork payload in memory.
+            let allTracks = tracks
             let candidates = Self.artworkCandidates(from: allTracks)
             guard !candidates.isEmpty else {
                 artworkTask = nil
@@ -157,6 +160,7 @@ final class LibraryStore {
                 artworkTask = nil
             }
 
+            var updatesSinceRefresh = 0
             for (index, candidate) in candidates.enumerated() {
                 guard !Task.isCancelled else { return }
                 artworkProgress = ArtworkProgress(
@@ -168,15 +172,22 @@ final class LibraryStore {
                 if let existingArtwork = candidate.existingArtwork {
                     artwork = existingArtwork
                 } else {
+                    let session = Self.makeEnrichmentSession()
+                    let artworkEnricher = AlbumArtworkEnricher(session: session)
                     artwork = await artworkEnricher.artwork(
                         artist: candidate.artist,
                         album: candidate.album,
                         releaseID: candidate.releaseID
                     )
+                    session.finishTasksAndInvalidate()
                 }
                 if let artwork {
                     try? await database.updateArtwork(trackIDs: candidate.trackIDs, artworkData: artwork)
-                    await refresh()
+                    updatesSinceRefresh += 1
+                    if updatesSinceRefresh >= 12 {
+                        await refresh()
+                        updatesSinceRefresh = 0
+                    }
                 }
                 artworkProgress = ArtworkProgress(
                     completed: index + 1,
@@ -184,19 +195,28 @@ final class LibraryStore {
                     currentAlbum: "\(candidate.artist) — \(candidate.album)"
                 )
             }
+            if updatesSinceRefresh > 0 { await refresh() }
         }
     }
 
-    private func startArtistArtworkEnrichment() {
+    private func startArtistArtworkEnrichment(forceRetry: Bool = false) {
         guard artistArtworkTask == nil, !isScanning, !lastFMAPIKey.isEmpty else { return }
         artistArtworkTask = Task { [weak self] in
             guard let self else { return }
-            let allTracks = (try? await database.fetchTracks()) ?? []
+            // The store already owns a complete snapshot; avoid loading every artwork BLOB
+            // again merely to derive the list of artists.
+            let allTracks = tracks
             let artists = Array(Set(allTracks.map(\.displayArtist)
                 .filter { !$0.isEmpty && $0 != "Unknown Artist" })).sorted {
                     $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
                 }
-            let missingArtists = artists.filter { self.artistArtwork[$0] == nil }
+            let retryCutoff = Date.now.addingTimeInterval(-30 * 24 * 60 * 60)
+            let recentAttempts = forceRetry
+                ? Set<String>()
+                : ((try? await database.recentlyAttemptedArtistArtwork(since: retryCutoff)) ?? [])
+            let missingArtists = artists.filter {
+                self.artistArtwork[$0] == nil && !recentAttempts.contains($0)
+            }
             guard !missingArtists.isEmpty else {
                 artistArtworkTask = nil
                 return
@@ -210,23 +230,35 @@ final class LibraryStore {
                 artistArtworkTask = nil
             }
 
-            let client = LastFMClient(apiKey: lastFMAPIKey)
-            for (index, artist) in missingArtists.enumerated() {
+            let batchSize = 20
+            for batchStart in stride(from: 0, to: missingArtists.count, by: batchSize) {
                 guard !Task.isCancelled else { return }
-                artistArtworkProgress = ArtistArtworkProgress(
-                    completed: index,
-                    total: missingArtists.count,
-                    currentArtist: artist
-                )
-                if let artwork = await client.artistImage(for: artist) {
-                    try? await database.updateArtistArtwork(artist: artist, artworkData: artwork)
-                    artistArtwork[artist] = artwork
+                let session = Self.makeEnrichmentSession()
+                let client = LastFMClient(apiKey: lastFMAPIKey, session: session)
+                let batchEnd = min(batchStart + batchSize, missingArtists.count)
+                for index in batchStart..<batchEnd {
+                    guard !Task.isCancelled else {
+                        session.invalidateAndCancel()
+                        return
+                    }
+                    let artist = missingArtists[index]
+                    artistArtworkProgress = ArtistArtworkProgress(
+                        completed: index,
+                        total: missingArtists.count,
+                        currentArtist: artist
+                    )
+                    if let artwork = await client.artistImage(for: artist) {
+                        try? await database.updateArtistArtwork(artist: artist, artworkData: artwork)
+                        artistArtwork[artist] = artwork
+                    }
+                    try? await database.recordArtistArtworkAttempt(artist: artist)
+                    artistArtworkProgress = ArtistArtworkProgress(
+                        completed: index + 1,
+                        total: missingArtists.count,
+                        currentArtist: artist
+                    )
                 }
-                artistArtworkProgress = ArtistArtworkProgress(
-                    completed: index + 1,
-                    total: missingArtists.count,
-                    currentArtist: artist
-                )
+                session.finishTasksAndInvalidate()
             }
         }
     }
@@ -302,7 +334,16 @@ final class LibraryStore {
             lastError = "Add a Last.fm API key in Settings first."
             return
         }
-        startArtistArtworkEnrichment()
+        startArtistArtworkEnrichment(forceRetry: true)
+    }
+
+    private nonisolated static func makeEnrichmentSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.httpMaximumConnectionsPerHost = 2
+        configuration.timeoutIntervalForRequest = 30
+        return URLSession(configuration: configuration)
     }
 
     func loadArtistProfile(for artist: String) {

@@ -164,9 +164,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         workspaceObservers = [
             center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
                 DiagnosticsLog.shared.record("system", "Mac will sleep")
+                NotificationCenter.default.post(name: .uziqWillSleep, object: nil)
             },
             center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
                 DiagnosticsLog.shared.record("system", "Mac woke from sleep")
+                NotificationCenter.default.post(name: .uziqDidWake, object: nil)
             }
         ]
     }
@@ -193,4 +195,6 @@ extension Notification.Name {
     static let uziqToggleQueuePlayback = Notification.Name("uziq.toggleQueuePlayback")
     static let uziqShowNowPlaying = Notification.Name("uziq.showNowPlaying")
     static let uziqShowOnboarding = Notification.Name("uziq.showOnboarding")
+    static let uziqWillSleep = Notification.Name("uziq.willSleep")
+    static let uziqDidWake = Notification.Name("uziq.didWake")
 }

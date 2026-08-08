@@ -330,20 +330,16 @@ struct BandcampArtistSubscriptionCard: View {
         } label: {
             VStack(alignment: .leading, spacing: 8) {
                 ZStack(alignment: .bottomTrailing) {
-                    AsyncImage(url: artist.artworkURL) { phase in
-                        if case .success(let image) = phase {
-                            image.resizable().scaledToFill()
-                        } else {
-                            ZStack {
-                                LinearGradient(
-                                    colors: [.pink.opacity(0.7), .indigo.opacity(0.75)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                                Image(systemName: "person.fill")
-                                    .font(.system(size: 34))
-                                    .foregroundStyle(.white.opacity(0.88))
-                            }
+                    CachedRemoteArtwork(url: artist.artworkURL) {
+                        ZStack {
+                            LinearGradient(
+                                colors: [.pink.opacity(0.7), .indigo.opacity(0.75)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                            Image(systemName: "person.fill")
+                                .font(.system(size: 34))
+                                .foregroundStyle(.white.opacity(0.88))
                         }
                     }
                     .frame(width: 118, height: 118)
@@ -390,20 +386,16 @@ struct BandcampCollectionCard: View {
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .bottomTrailing) {
                 Button(action: onShowDetails) {
-                    AsyncImage(url: result.artworkURL) { phase in
-                        if case .success(let image) = phase {
-                            image.resizable().scaledToFill()
-                        } else {
-                            ZStack {
-                                LinearGradient(
-                                    colors: [.indigo.opacity(0.55), .purple.opacity(0.75)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                                Image(systemName: result.type == "a" ? "square.stack.fill" : "music.note")
-                                    .font(.title)
-                                    .foregroundStyle(.white.opacity(0.85))
-                            }
+                    CachedRemoteArtwork(url: result.artworkURL) {
+                        ZStack {
+                            LinearGradient(
+                                colors: [.indigo.opacity(0.55), .purple.opacity(0.75)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                            Image(systemName: result.type == "a" ? "square.stack.fill" : "music.note")
+                                .font(.title)
+                                .foregroundStyle(.white.opacity(0.85))
                         }
                     }
                     .frame(width: 142, height: 142)
@@ -470,20 +462,16 @@ struct BandcampArtistDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 HStack(spacing: 24) {
-                    AsyncImage(url: artist.artworkURL) { phase in
-                        if case .success(let image) = phase {
-                            image.resizable().scaledToFill()
-                        } else {
-                            ZStack {
-                                LinearGradient(
-                                    colors: [.pink.opacity(0.7), .indigo.opacity(0.78)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                                Image(systemName: "person.fill")
-                                    .font(.system(size: 52))
-                                    .foregroundStyle(.white.opacity(0.88))
-                            }
+                    CachedRemoteArtwork(url: artist.artworkURL) {
+                        ZStack {
+                            LinearGradient(
+                                colors: [.pink.opacity(0.7), .indigo.opacity(0.78)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                            Image(systemName: "person.fill")
+                                .font(.system(size: 52))
+                                .foregroundStyle(.white.opacity(0.88))
                         }
                     }
                     .frame(width: 180, height: 180)
@@ -596,19 +584,15 @@ private struct BandcampArtistReleaseRow: View {
                 BandcampReleaseDetailView(result: release)
             } label: {
                 HStack(spacing: 14) {
-                    AsyncImage(url: release.artworkURL) { phase in
-                        if case .success(let image) = phase {
-                            image.resizable().scaledToFill()
-                        } else {
-                            ZStack {
-                                LinearGradient(
-                                    colors: [.indigo.opacity(0.55), .purple.opacity(0.75)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                                Image(systemName: release.type == "a" ? "square.stack.fill" : "music.note")
-                                    .foregroundStyle(.white.opacity(0.85))
-                            }
+                    CachedRemoteArtwork(url: release.artworkURL) {
+                        ZStack {
+                            LinearGradient(
+                                colors: [.indigo.opacity(0.55), .purple.opacity(0.75)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                            Image(systemName: release.type == "a" ? "square.stack.fill" : "music.note")
+                                .foregroundStyle(.white.opacity(0.85))
                         }
                     }
                     .frame(width: 60, height: 60)
@@ -665,20 +649,16 @@ struct BandcampReleaseDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 HStack(alignment: .bottom, spacing: 22) {
-                    AsyncImage(url: details?.artworkURL ?? result.artworkURL) { phase in
-                        if case .success(let image) = phase {
-                            image.resizable().scaledToFill()
-                        } else {
-                            ZStack {
-                                LinearGradient(
-                                    colors: [.indigo.opacity(0.55), .purple.opacity(0.75)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                                Image(systemName: "square.stack.fill")
-                                    .font(.system(size: 52))
-                                    .foregroundStyle(.white.opacity(0.85))
-                            }
+                    CachedRemoteArtwork(url: details?.artworkURL ?? result.artworkURL) {
+                        ZStack {
+                            LinearGradient(
+                                colors: [.indigo.opacity(0.55), .purple.opacity(0.75)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                            Image(systemName: "square.stack.fill")
+                                .font(.system(size: 52))
+                                .foregroundStyle(.white.opacity(0.85))
                         }
                     }
                     .frame(width: 190, height: 190)
@@ -870,15 +850,11 @@ struct BandcampResultRow: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            AsyncImage(url: result.artworkURL) { phase in
-                if case .success(let image) = phase {
-                    image.resizable().scaledToFill()
-                } else {
-                    ZStack {
-                        LinearGradient(colors: [.indigo.opacity(0.55), .purple.opacity(0.7)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                        Image(systemName: result.type == "b" ? "person.fill" : "music.note")
-                            .foregroundStyle(.white.opacity(0.85))
-                    }
+            CachedRemoteArtwork(url: result.artworkURL) {
+                ZStack {
+                    LinearGradient(colors: [.indigo.opacity(0.55), .purple.opacity(0.7)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    Image(systemName: result.type == "b" ? "person.fill" : "music.note")
+                        .foregroundStyle(.white.opacity(0.85))
                 }
             }
             .frame(width: 64, height: 64)

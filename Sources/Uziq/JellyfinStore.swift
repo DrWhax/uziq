@@ -36,6 +36,7 @@ final class JellyfinStore {
     @ObservationIgnored private var client: JellyfinClient?
     @ObservationIgnored private let cache = JellyfinCacheManager()
     @ObservationIgnored private let imageCache = NSCache<NSString, NSData>()
+    @ObservationIgnored private var imageTasks: [String: Task<Data?, Never>] = [:]
     @ObservationIgnored private var playbackGeneration = UUID()
     @ObservationIgnored private var prefetchingItemIDs: Set<String> = []
     @ObservationIgnored private var isLibraryLoadInProgress = false
@@ -44,6 +45,8 @@ final class JellyfinStore {
     init() {
         serverAddress = UserDefaults.standard.string(forKey: "jellyfin-server-url") ?? ""
         username = UserDefaults.standard.string(forKey: "jellyfin-username") ?? ""
+        imageCache.countLimit = 240
+        imageCache.totalCostLimit = 64 * 1_024 * 1_024
         if let session = JellyfinKeychain.readSession() {
             self.session = session
             serverAddress = session.serverURL.absoluteString
@@ -271,20 +274,28 @@ final class JellyfinStore {
 
     func artworkData(for item: JellyfinCatalogItem, maxWidth: Int = 500) async -> Data? {
         guard let imageItemID = item.imageItemID, let client else { return nil }
-        let key = "\(imageItemID)-\(item.imageTag ?? "")-\(maxWidth)" as NSString
-        if let data = imageCache.object(forKey: key) { return data as Data }
-        do {
-            let request = Paths.getItemImage(
-                itemID: imageItemID,
-                imageType: "Primary",
-                parameters: .init(maxWidth: maxWidth, quality: 90, tag: item.imageTag)
-            )
-            let data = try await client.data(for: request).value
-            imageCache.setObject(data as NSData, forKey: key, cost: data.count)
-            return data
-        } catch {
-            return nil
+        let key = "\(imageItemID)-\(item.imageTag ?? "")-\(maxWidth)"
+        let cacheKey = key as NSString
+        if let data = imageCache.object(forKey: cacheKey) { return data as Data }
+        if let existing = imageTasks[key] { return await existing.value }
+
+        let task = Task<Data?, Never> {
+            do {
+                let request = Paths.getItemImage(
+                    itemID: imageItemID,
+                    imageType: "Primary",
+                    parameters: .init(maxWidth: maxWidth, quality: 88, tag: item.imageTag)
+                )
+                return try await client.data(for: request).value
+            } catch {
+                return nil
+            }
         }
+        imageTasks[key] = task
+        let data = await task.value
+        imageTasks[key] = nil
+        if let data { imageCache.setObject(data as NSData, forKey: cacheKey, cost: data.count) }
+        return data
     }
 
     func play(
@@ -480,10 +491,14 @@ final class JellyfinStore {
         let deviceID = defaults.string(forKey: deviceKey) ?? UUID().uuidString
         defaults.set(deviceID, forKey: deviceKey)
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.urlCache = nil
+        sessionConfiguration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        sessionConfiguration.httpMaximumConnectionsPerHost = 6
         return JellyfinClient(configuration: .init(
             url: url, accessToken: token, client: "Uziq",
             deviceName: Host.current().localizedName ?? "Mac", deviceID: deviceID, version: version
-        ))
+        ), sessionConfiguration: sessionConfiguration)
     }
 
     private func clearSearch() {

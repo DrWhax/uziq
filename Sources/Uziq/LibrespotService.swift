@@ -19,6 +19,9 @@ final class LibrespotService {
     @ObservationIgnored private var eraseCredentialsWhenStopped = false
     @ObservationIgnored private var stopRequested = false
     @ObservationIgnored private var appTerminationObserver: NSObjectProtocol?
+    @ObservationIgnored private var sleepObserver: NSObjectProtocol?
+    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
+    @ObservationIgnored private var wasRunningBeforeSleep = false
 
     private let processIDDefaultsKey = "librespot-process-id"
 
@@ -32,6 +35,32 @@ final class LibrespotService {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.terminateForAppExit()
+            }
+        }
+        sleepObserver = NotificationCenter.default.addObserver(
+            forName: .uziqWillSleep,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.wasRunningBeforeSleep = self?.process?.isRunning == true
+            }
+        }
+        wakeObserver = NotificationCenter.default.addObserver(
+            forName: .uziqDidWake,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.wasRunningBeforeSleep else { return }
+                self.wasRunningBeforeSleep = false
+                try? await Task.sleep(for: .seconds(2))
+                if self.process?.isRunning == true {
+                    DiagnosticsLog.shared.record("spotify", "Playback engine remained healthy after wake")
+                } else {
+                    DiagnosticsLog.shared.record("spotify", "Restarting playback engine after wake")
+                    self.startProcess()
+                }
             }
         }
     }
@@ -75,6 +104,10 @@ final class LibrespotService {
     }
 
     func start(using _: PlaybackEngine) {
+        startProcess()
+    }
+
+    private func startProcess() {
         guard process?.isRunning != true else {
             return
         }
@@ -225,6 +258,8 @@ final class LibrespotService {
 
     deinit {
         if let appTerminationObserver { NotificationCenter.default.removeObserver(appTerminationObserver) }
+        if let sleepObserver { NotificationCenter.default.removeObserver(sleepObserver) }
+        if let wakeObserver { NotificationCenter.default.removeObserver(wakeObserver) }
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         if process?.isRunning == true { process?.terminate() }
     }

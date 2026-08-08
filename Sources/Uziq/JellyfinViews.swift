@@ -416,8 +416,8 @@ struct JellyfinArtwork: View {
     var body: some View {
         ZStack {
             Rectangle().fill(.quaternary)
-            if let data, let image = NSImage(data: data) {
-                Image(nsImage: image).resizable().scaledToFill()
+            if let data {
+                ArtworkView(data: data)
             } else {
                 Image(systemName: item.kind.systemImage)
                     .font(.system(size: 34, weight: .medium)).foregroundStyle(.secondary)

@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -301,8 +302,28 @@ struct TrackListView: View {
 
     var body: some View {
         @Bindable var library = library
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
+        List {
+            Section {
+                if library.displayedTracks.isEmpty && library.selectedSection == .mostPlayed {
+                    ContentUnavailableView(
+                        "No plays yet",
+                        systemImage: "chart.bar.xaxis",
+                        description: Text("Tracks you start playing will appear here.")
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 220)
+                    .listRowSeparator(.hidden)
+                } else {
+                    ForEach(library.displayedTracks) { track in
+                        TrackRow(
+                            track: track,
+                            play: { queue.replace(with: library.displayedTracks, startingAt: track) },
+                            showsDivider: false
+                        )
+                        .listRowInsets(EdgeInsets(top: 0, leading: 28, bottom: 0, trailing: 28))
+                        .listRowSeparator(.hidden)
+                    }
+                }
+            } header: {
                 HStack(alignment: .lastTextBaseline) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(library.selectedSection.title)
@@ -323,26 +344,13 @@ struct TrackListView: View {
                     }
                     Spacer()
                 }
-
-                if library.displayedTracks.isEmpty && library.selectedSection == .mostPlayed {
-                    ContentUnavailableView(
-                        "No plays yet",
-                        systemImage: "chart.bar.xaxis",
-                        description: Text("Tracks you start playing will appear here.")
-                    )
-                    .frame(maxWidth: .infinity, minHeight: 220)
-                } else {
-                    LazyVStack(spacing: 0) {
-                        ForEach(library.displayedTracks) { track in
-                            TrackRow(track: track) {
-                                queue.replace(with: library.displayedTracks, startingAt: track)
-                            }
-                        }
-                    }
-                }
+                .textCase(nil)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 14)
             }
-            .padding(28)
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
     }
 }
 
@@ -838,6 +846,7 @@ struct TrackRow: View {
     let track: Track
     let play: () -> Void
     var playlist: PlaylistSummary? = nil
+    var showsDivider = true
     @Environment(LibraryStore.self) private var library
     @Environment(PlaybackEngine.self) private var playback
     @Environment(PlaybackQueueStore.self) private var queue
@@ -902,7 +911,7 @@ struct TrackRow: View {
             Button("Identify with AcoustID") { library.identify(track) }
             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([track.url]) }
         }
-        Divider()
+        if showsDivider { Divider() }
     }
 }
 
@@ -1597,7 +1606,7 @@ struct ArtworkView: View {
 
     var body: some View {
         Group {
-            if let data, let image = NSImage(data: data) {
+            if let data, let image = ArtworkImageCache.shared.image(for: data) {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFill()
@@ -1611,6 +1620,70 @@ struct ArtworkView: View {
             }
         }
         .clipped()
+    }
+}
+
+struct CachedRemoteArtwork<Placeholder: View>: View {
+    let url: URL?
+    @ViewBuilder let placeholder: () -> Placeholder
+    @State private var data: Data?
+
+    var body: some View {
+        Group {
+            if let data {
+                ArtworkView(data: data)
+            } else {
+                placeholder()
+            }
+        }
+        .clipped()
+        .task(id: url) {
+            data = nil
+            data = await RemoteArtworkCache.shared.data(for: url)
+        }
+    }
+}
+
+private final class ArtworkImageCache: @unchecked Sendable {
+    static let shared = ArtworkImageCache()
+
+    private let cache = NSCache<NSString, NSImage>()
+
+    private init() {
+        cache.countLimit = 180
+        cache.totalCostLimit = 64 * 1_024 * 1_024
+    }
+
+    func image(for data: Data) -> NSImage? {
+        let key = cacheKey(for: data)
+        if let image = cache.object(forKey: key) { return image }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 768,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        let image = NSImage(
+            cgImage: cgImage,
+            size: NSSize(width: cgImage.width, height: cgImage.height)
+        )
+        cache.setObject(image, forKey: key, cost: cgImage.bytesPerRow * cgImage.height)
+        return image
+    }
+
+    private func cacheKey(for data: Data) -> NSString {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in data.prefix(32) {
+            hash = (hash ^ UInt64(byte)) &* 1_099_511_628_211
+        }
+        for byte in data.suffix(32) {
+            hash = (hash ^ UInt64(byte)) &* 1_099_511_628_211
+        }
+        return "\(data.count)-\(hash)" as NSString
     }
 }
 
@@ -1639,8 +1712,16 @@ struct SettingsView: View {
             }
             Section("Library folders") {
                 if library.folderRoots.isEmpty {
-                    Text("No folders added")
-                        .foregroundStyle(.secondary)
+                    if library.tracks.isEmpty {
+                        Text("No folders added")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Label(
+                            "The index contains \(library.tracks.count) tracks, but Uziq no longer has an active folder root. Re-add the parent music folders to enable rescanning.",
+                            systemImage: "folder.badge.questionmark"
+                        )
+                        .foregroundStyle(.orange)
+                    }
                 } else {
                     ForEach(library.folderRoots, id: \.self) { url in
                         HStack {
@@ -1656,6 +1737,7 @@ struct SettingsView: View {
                 HStack {
                     Button("Add Folder…") { library.presentFolderImporter() }
                     Button("Rescan All") { library.scan() }
+                        .disabled(library.folderRoots.isEmpty)
                 }
             }
             Section("Equalizer") {

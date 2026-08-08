@@ -77,6 +77,14 @@ final class PlaybackEngine {
     @ObservationIgnored private var scheduleGeneration = 0
     @ObservationIgnored private var progressTimer: Timer?
     @ObservationIgnored private var toggleObserver: NSObjectProtocol?
+    @ObservationIgnored private var engineConfigurationObserver: NSObjectProtocol?
+    @ObservationIgnored private var sleepObserver: NSObjectProtocol?
+    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
+    @ObservationIgnored private var recoveryTask: Task<Void, Never>?
+    @ObservationIgnored private var isSystemSleeping = false
+    @ObservationIgnored private var resumeAfterWake = false
+    @ObservationIgnored private var positionBeforeSleep = 0.0
+    @ObservationIgnored private var trackIDBeforeSleep: String?
     @ObservationIgnored private var nextTrackProvider: (@MainActor () async -> Track?)?
     @ObservationIgnored private var prefetchTask: Task<Void, Never>?
     @ObservationIgnored private var isWaitingForNextTrack = false
@@ -132,12 +140,37 @@ final class PlaybackEngine {
         ) { [weak self] _ in
             Task { @MainActor in self?.toggle() }
         }
+        engineConfigurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: audioEngine,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.audioEngineConfigurationChanged() }
+        }
+        sleepObserver = NotificationCenter.default.addObserver(
+            forName: .uziqWillSleep,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.systemWillSleep() }
+        }
+        wakeObserver = NotificationCenter.default.addObserver(
+            forName: .uziqDidWake,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.systemDidWake() }
+        }
     }
 
     deinit {
         progressTimer?.invalidate()
         prefetchTask?.cancel()
+        recoveryTask?.cancel()
         if let toggleObserver { NotificationCenter.default.removeObserver(toggleObserver) }
+        if let engineConfigurationObserver { NotificationCenter.default.removeObserver(engineConfigurationObserver) }
+        if let sleepObserver { NotificationCenter.default.removeObserver(sleepObserver) }
+        if let wakeObserver { NotificationCenter.default.removeObserver(wakeObserver) }
         playerNode.stop()
         spotifyPlayerNode.stop()
         audioEngine.stop()
@@ -554,6 +587,100 @@ final class PlaybackEngine {
         guard !audioEngine.isRunning else { return }
         audioEngine.prepare()
         try audioEngine.start()
+    }
+
+    private func systemWillSleep() {
+        isSystemSleeping = true
+        recoveryTask?.cancel()
+        guard let currentTrack, !isSpotifyPCMActive else { return }
+        trackIDBeforeSleep = currentTrack.id
+        positionBeforeSleep = currentTime
+        resumeAfterWake = isPlaying || playerNode.isPlaying
+        if isPlaying {
+            playerNode.pause()
+            isPlaying = false
+        }
+        DiagnosticsLog.shared.record(
+            "audio",
+            "Saved local playback state before sleep (playing: \(resumeAfterWake))"
+        )
+    }
+
+    private func systemDidWake() {
+        isSystemSleeping = false
+        guard let currentTrack,
+              !isSpotifyPCMActive,
+              currentTrack.id == trackIDBeforeSleep else {
+            clearSleepRecoveryState()
+            return
+        }
+        let trackID = currentTrack.id
+        let position = positionBeforeSleep
+        let shouldPlay = resumeAfterWake
+        clearSleepRecoveryState()
+        scheduleRecovery(after: .milliseconds(750)) { [weak self] in
+            guard let self, self.currentTrack?.id == trackID else { return }
+            self.recoverLocalPlayback(at: position, shouldPlay: shouldPlay, reason: "wake")
+        }
+    }
+
+    private func audioEngineConfigurationChanged() {
+        guard !isSystemSleeping,
+              let currentTrack,
+              !isSpotifyPCMActive else { return }
+        let trackID = currentTrack.id
+        let position = currentTime
+        let shouldPlay = isPlaying || playerNode.isPlaying
+        scheduleRecovery(after: .milliseconds(300)) { [weak self] in
+            guard let self, self.currentTrack?.id == trackID, !self.isSystemSleeping else { return }
+            if self.audioEngine.isRunning, !shouldPlay || self.playerNode.isPlaying {
+                DiagnosticsLog.shared.record("audio", "Audio output configuration changed cleanly")
+                return
+            }
+            self.recoverLocalPlayback(at: position, shouldPlay: shouldPlay, reason: "output change")
+        }
+    }
+
+    private func scheduleRecovery(
+        after delay: Duration,
+        operation: @escaping @MainActor () -> Void
+    ) {
+        recoveryTask?.cancel()
+        recoveryTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            operation()
+            self?.recoveryTask = nil
+        }
+    }
+
+    private func recoverLocalPlayback(at seconds: Double, shouldPlay: Bool, reason: String) {
+        guard let audioFile, currentTrack != nil else { return }
+        let safeSeconds = min(max(0, seconds.isFinite ? seconds : 0), duration)
+        let frame = min(totalFrames, max(0, AVAudioFramePosition(safeSeconds * sampleRate)))
+        do {
+            if !audioEngine.isRunning { try startAudioEngine() }
+            scheduleGeneration += 1
+            playerNode.stop()
+            schedule(audioFile, from: frame, shouldPlay: shouldPlay)
+            currentTime = safeSeconds
+            DiagnosticsLog.shared.record(
+                "audio",
+                "Recovered local playback after \(reason) (resumed: \(shouldPlay))"
+            )
+        } catch {
+            isPlaying = false
+            DiagnosticsLog.shared.record(
+                "audio",
+                "Audio recovery after \(reason) failed: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func clearSleepRecoveryState() {
+        trackIDBeforeSleep = nil
+        positionBeforeSleep = 0
+        resumeAfterWake = false
     }
 
     private func firstAvailableIndex(startingAt index: Int) -> Int? {

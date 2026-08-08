@@ -99,6 +99,14 @@ struct BookmarkStore: Sendable {
 
     private func saveRecords(_ records: [Record]) {
         guard let data = try? JSONEncoder().encode(records) else { return }
-        try? data.write(to: storageURL, options: .atomic)
+        do {
+            try data.write(to: storageURL, options: .atomic)
+            // Once the path-backed format is safely written, discard legacy
+            // bookmark-only values that can no longer be resolved.
+            UserDefaults.standard.removeObject(forKey: legacyKey)
+        } catch {
+            // Folder selection remains visible for this launch; a later add or
+            // removal will retry persistence without blocking library use.
+        }
     }
 }

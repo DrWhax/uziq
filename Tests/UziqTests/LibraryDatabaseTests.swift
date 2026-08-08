@@ -63,12 +63,27 @@ final class LibraryDatabaseTests: XCTestCase {
             block.append(bytes)
         }
 
+        let artwork = Data([0xFF, 0xD8, 0xFF, 0xD9])
+        let mime = Data("image/jpeg".utf8)
+        var picture = Data()
+        picture.append(bigEndian(3)) // Front cover
+        picture.append(bigEndian(UInt32(mime.count)))
+        picture.append(mime)
+        picture.append(bigEndian(0)) // Empty description
+        picture.append(bigEndian(1)) // Width
+        picture.append(bigEndian(1)) // Height
+        picture.append(bigEndian(24)) // Color depth
+        picture.append(bigEndian(0)) // Indexed colors
+        picture.append(bigEndian(UInt32(artwork.count)))
+        picture.append(artwork)
+
+        // Real FLAC files commonly place STREAMINFO and SEEKTABLE blocks before
+        // Vorbis comments, then store cover art in a native PICTURE block.
         var flac = Data("fLaC".utf8)
-        flac.append(0x84) // last metadata block, Vorbis comment type
-        flac.append(UInt8((block.count >> 16) & 0xFF))
-        flac.append(UInt8((block.count >> 8) & 0xFF))
-        flac.append(UInt8(block.count & 0xFF))
-        flac.append(block)
+        appendFLACBlock(type: 0, data: Data(repeating: 0, count: 34), to: &flac)
+        appendFLACBlock(type: 3, data: Data(repeating: 0, count: 18), to: &flac)
+        appendFLACBlock(type: 4, data: block, to: &flac)
+        appendFLACBlock(type: 6, data: picture, isLast: true, to: &flac)
 
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("uziq-tags.flac")
         try flac.write(to: url)
@@ -80,6 +95,8 @@ final class LibraryDatabaseTests: XCTestCase {
         XCTAssertEqual(metadata.album, "Tagged Album")
         XCTAssertEqual(metadata.genre, "Ambient")
         XCTAssertEqual(metadata.trackNumber, 2)
+        XCTAssertEqual(metadata.artworkData, artwork)
+        XCTAssertEqual(metadata.codec, "FLAC")
     }
 
     func testFavoritesAndPlaylists() async throws {
@@ -171,5 +188,22 @@ final class LibraryDatabaseTests: XCTestCase {
             UInt8((value >> 16) & 0xFF),
             UInt8((value >> 24) & 0xFF)
         ])
+    }
+
+    private func bigEndian(_ value: UInt32) -> Data {
+        Data([
+            UInt8((value >> 24) & 0xFF),
+            UInt8((value >> 16) & 0xFF),
+            UInt8((value >> 8) & 0xFF),
+            UInt8(value & 0xFF)
+        ])
+    }
+
+    private func appendFLACBlock(type: UInt8, data: Data, isLast: Bool = false, to flac: inout Data) {
+        flac.append(type | (isLast ? 0x80 : 0))
+        flac.append(UInt8((data.count >> 16) & 0xFF))
+        flac.append(UInt8((data.count >> 8) & 0xFF))
+        flac.append(UInt8(data.count & 0xFF))
+        flac.append(data)
     }
 }

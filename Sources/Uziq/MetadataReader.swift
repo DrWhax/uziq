@@ -15,7 +15,8 @@ struct MetadataReader: Sendable {
         let values = try? FileManager.default.attributesOfItem(atPath: url.path)
         let modifiedAt = (values?[.modificationDate] as? Date) ?? .now
         let fileSize = (values?[.size] as? NSNumber)?.int64Value ?? 0
-        let fallback = readVorbisComments(from: url)
+        let flacMetadata = readFLACMetadata(from: url)
+        let fallback = flacMetadata.comments
         let asset = AVURLAsset(url: url)
         async let commonMetadata = asset.load(.commonMetadata)
         async let assetDuration = asset.load(.duration)
@@ -45,13 +46,13 @@ struct MetadataReader: Sendable {
         } else {
             nil
         }
-        let artwork = embeddedArtwork ?? readVorbisArtwork(from: url)
+        let artwork = embeddedArtwork ?? flacMetadata.artwork
 
         let duration = (try? await assetDuration) ?? .zero
         let seconds = duration.isNumeric ? CMTimeGetSeconds(duration) : 0
         let format = try? AVAudioFile(forReading: url)
         let sampleRate = format?.processingFormat.sampleRate
-        let codec = format.map { String(describing: $0.fileFormat.formatDescription) } ?? url.pathExtension.uppercased()
+        let codec = url.pathExtension.uppercased()
         let bitrate = format.map { Int(formatBitrate($0)) }
 
         return TrackMetadata(
@@ -136,20 +137,49 @@ struct MetadataReader: Sendable {
     /// AVFoundation can open FLAC audio but does not consistently expose Vorbis
     /// comments on macOS. Parse the small FLAC metadata blocks directly so tags
     /// remain searchable without adding a heavyweight decoder dependency.
-    private static func readVorbisComments(from url: URL) -> [String: String] {
-        guard url.pathExtension.lowercased() == "flac", let handle = try? FileHandle(forReadingFrom: url) else { return [:] }
-        defer { try? handle.close() }
-        guard let magic = try? handle.read(upToCount: 4), magic == Data("fLaC".utf8) else { return [:] }
+    private struct FLACMetadata {
+        var comments: [String: String] = [:]
+        var artwork: Data?
+    }
 
-        while let header = try? handle.read(upToCount: 4), header.count == 4 {
+    private static func readFLACMetadata(from url: URL) -> FLACMetadata {
+        guard url.pathExtension.lowercased() == "flac",
+              let handle = try? FileHandle(forReadingFrom: url) else { return FLACMetadata() }
+        defer { try? handle.close() }
+        guard readExactly(4, from: handle) == Data("fLaC".utf8) else { return FLACMetadata() }
+
+        var metadata = FLACMetadata()
+        while let header = readExactly(4, from: handle) {
             let lastBlock = header[0] & 0x80 != 0
             let type = header[0] & 0x7F
             let length = (Int(header[1]) << 16) | (Int(header[2]) << 8) | Int(header[3])
-            guard length <= 64 * 1024 * 1024, let block = try? handle.read(upToCount: length), block.count == length else { return [:] }
-            if type == 4 { return parseVorbisCommentBlock(block) }
+            guard length <= 64 * 1024 * 1024,
+                  let block = readExactly(length, from: handle) else { break }
+            if type == 4 {
+                metadata.comments = parseVorbisCommentBlock(block)
+            } else if type == 6, metadata.artwork == nil {
+                metadata.artwork = parseFLACPictureBlock(block)
+            }
             if lastBlock { break }
         }
-        return [:]
+        if metadata.artwork == nil,
+           let encoded = metadata.comments["METADATA_BLOCK_PICTURE"],
+           let block = Data(base64Encoded: encoded) {
+            metadata.artwork = parseFLACPictureBlock(block)
+        }
+        return metadata
+    }
+
+    private static func readExactly(_ count: Int, from handle: FileHandle) -> Data? {
+        guard count >= 0 else { return nil }
+        var data = Data()
+        data.reserveCapacity(count)
+        while data.count < count {
+            guard let chunk = try? handle.read(upToCount: count - data.count),
+                  !chunk.isEmpty else { return nil }
+            data.append(chunk)
+        }
+        return data
     }
 
     private static func parseVorbisCommentBlock(_ block: Data) -> [String: String] {
@@ -173,8 +203,7 @@ struct MetadataReader: Sendable {
         return tags
     }
 
-    private static func readVorbisArtwork(from url: URL) -> Data? {
-        guard let encoded = readVorbisComments(from: url)["METADATA_BLOCK_PICTURE"], let block = Data(base64Encoded: encoded) else { return nil }
+    private static func parseFLACPictureBlock(_ block: Data) -> Data? {
         var offset = 0
         guard skipBigEndianField(block, offset: &offset), let mimeLength = bigEndianUInt32(block, at: offset) else { return nil }
         offset += 4 + Int(mimeLength)

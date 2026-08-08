@@ -669,7 +669,6 @@ final class BandcampStore {
     }
 
     private func downloadArtwork(from url: URL?) async -> Data? {
-        guard let url else { return nil }
-        return try? await URLSession.shared.data(from: url).0
+        await RemoteArtworkCache.shared.data(for: url)
     }
 }

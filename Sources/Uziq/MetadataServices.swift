@@ -67,6 +67,12 @@ struct MusicBrainzReleaseCandidate: Sendable {
 }
 
 struct MusicBrainzClient: Sendable {
+    let session: URLSession
+
+    init(session: URLSession = .shared) {
+        self.session = session
+    }
+
     func releaseCandidates(artist: String, album: String) async throws -> [MusicBrainzReleaseCandidate] {
         let cleanArtist = artist.replacingOccurrences(of: "\"", with: "")
         let cleanAlbum = album.replacingOccurrences(of: "\"", with: "")
@@ -82,7 +88,7 @@ struct MusicBrainzClient: Sendable {
         try await Task.sleep(nanoseconds: 1_000_000_000)
         var request = URLRequest(url: url)
         request.setValue("Uziq/1.0 (macOS music player; local metadata enrichment)", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { return [] }
         let decoded = try JSONDecoder().decode(ReleaseSearchResponse.self, from: data)
         return decoded.releases.map {
@@ -107,7 +113,7 @@ struct MusicBrainzClient: Sendable {
         try await Task.sleep(nanoseconds: 1_000_000_000)
         var request = URLRequest(url: url)
         request.setValue("Uziq/1.0 (macOS music player; local metadata enrichment)", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         let decoded = try JSONDecoder().decode(ReleaseGroupSearchResponse.self, from: data)
         return decoded.releaseGroups.first?.id
@@ -119,7 +125,7 @@ struct MusicBrainzClient: Sendable {
         try await Task.sleep(nanoseconds: 1_000_000_000)
         var request = URLRequest(url: url)
         request.setValue("Uziq/1.0 (macOS music player; local metadata enrichment)", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         let decoded = try JSONDecoder().decode(Response.self, from: data)
         let firstRelease = decoded.releases?.first
@@ -248,6 +254,12 @@ struct AcoustIDClient: Sendable {
 }
 
 struct CoverArtArchiveClient: Sendable {
+    let session: URLSession
+
+    init(session: URLSession = .shared) {
+        self.session = session
+    }
+
     func frontArtwork(forReleaseID releaseID: String) async throws -> Data? {
         guard let url = URL(string: "https://coverartarchive.org/release/\(releaseID)/front-500") else { return nil }
         return try await artwork(from: url)
@@ -261,7 +273,7 @@ struct CoverArtArchiveClient: Sendable {
     private func artwork(from url: URL) async throws -> Data? {
         var request = URLRequest(url: url)
         request.setValue("Uziq/1.0 (macOS music player)", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return data
     }
@@ -269,6 +281,12 @@ struct CoverArtArchiveClient: Sendable {
 
 struct LastFMClient: Sendable {
     let apiKey: String
+    let session: URLSession
+
+    init(apiKey: String, session: URLSession = .shared) {
+        self.apiKey = apiKey
+        self.session = session
+    }
 
     func artistBiography(for artist: String) async -> String? {
         guard let response = await fetchArtist(for: artist) else { return nil }
@@ -289,7 +307,7 @@ struct LastFMClient: Sendable {
         do {
             var request = URLRequest(url: url)
             request.setValue("Uziq/1.0 (macOS music player; artist artwork)", forHTTPHeaderField: "User-Agent")
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
             let decoded = try JSONDecoder().decode(ImageResponse.self, from: data)
             let apiImageURL = decoded.artist.images
@@ -305,7 +323,7 @@ struct LastFMClient: Sendable {
             guard let imageURL else { return nil }
             var imageRequest = URLRequest(url: imageURL)
             imageRequest.setValue("Uziq/1.0 (macOS music player; artist artwork)", forHTTPHeaderField: "User-Agent")
-            let (imageData, imageResponse) = try await URLSession.shared.data(for: imageRequest)
+            let (imageData, imageResponse) = try await session.data(for: imageRequest)
             guard (imageResponse as? HTTPURLResponse)?.statusCode == 200 else { return nil }
             guard !Self.isPlaceholderImage(imageData) else { return nil }
             return imageData
@@ -334,7 +352,7 @@ struct LastFMClient: Sendable {
         do {
             var request = URLRequest(url: url)
             request.setValue("Uziq/1.0 (macOS music player; artist artwork)", forHTTPHeaderField: "User-Agent")
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
             return try JSONDecoder().decode(Response.self, from: data)
         } catch {
@@ -378,7 +396,7 @@ struct LastFMClient: Sendable {
         do {
             var request = URLRequest(url: pageURL)
             request.setValue("Uziq/1.0 (macOS music player; artist artwork)", forHTTPHeaderField: "User-Agent")
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200,
                   let html = String(data: data, encoding: .utf8) else { return nil }
             let pattern = #"<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["'][^>]*>"#
@@ -438,8 +456,13 @@ struct LastFMClient: Sendable {
 }
 
 struct AlbumArtworkEnricher: Sendable {
-    private let musicBrainz = MusicBrainzClient()
-    private let coverArt = CoverArtArchiveClient()
+    private let musicBrainz: MusicBrainzClient
+    private let coverArt: CoverArtArchiveClient
+
+    init(session: URLSession = .shared) {
+        musicBrainz = MusicBrainzClient(session: session)
+        coverArt = CoverArtArchiveClient(session: session)
+    }
 
     func artwork(artist: String, album: String, releaseID: String?) async -> Data? {
         guard !artist.isEmpty, !album.isEmpty else { return nil }

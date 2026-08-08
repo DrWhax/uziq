@@ -814,16 +814,12 @@ struct SpotifyRemoteArtwork: View {
     let systemImage: String
 
     var body: some View {
-        AsyncImage(url: url) { phase in
-            if case .success(let image) = phase {
-                image.resizable().scaledToFill()
-            } else {
-                ZStack {
-                    LinearGradient(colors: [.green.opacity(0.65), .black.opacity(0.8)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                    Image(systemName: systemImage)
-                        .font(.system(size: 28, weight: .light))
-                        .foregroundStyle(.white.opacity(0.9))
-                }
+        CachedRemoteArtwork(url: url) {
+            ZStack {
+                LinearGradient(colors: [.green.opacity(0.65), .black.opacity(0.8)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                Image(systemName: systemImage)
+                    .font(.system(size: 28, weight: .light))
+                    .foregroundStyle(.white.opacity(0.9))
             }
         }
         .clipped()

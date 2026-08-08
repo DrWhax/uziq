@@ -110,8 +110,13 @@ actor LibraryDatabase {
         defer { sqlite3_finalize(statement) }
         for (index, value) in bindings.enumerated() { bind(value, to: statement, index: Int32(index + 1)) }
         var tracks: [Track] = []
+        var artworkPool: [Data: Data] = [:]
         while sqlite3_step(statement) == SQLITE_ROW {
-            tracks.append(readTrack(statement, playCountIndex: mostPlayedSince == nil ? nil : 24))
+            tracks.append(readTrack(
+                statement,
+                playCountIndex: mostPlayedSince == nil ? nil : 24,
+                artworkPool: &artworkPool
+            ))
         }
         return tracks
     }
@@ -147,6 +152,30 @@ actor LibraryDatabase {
         bind(artist, to: statement, index: 1)
         bind(artworkData, to: statement, index: 2)
         bind(Date.now.timeIntervalSince1970, to: statement, index: 3)
+        try step(statement)
+    }
+
+    func recentlyAttemptedArtistArtwork(since date: Date) throws -> Set<String> {
+        let statement = try prepare("SELECT artist FROM artist_artwork_attempts WHERE attempted_at >= ?")
+        defer { sqlite3_finalize(statement) }
+        bind(date.timeIntervalSince1970, to: statement, index: 1)
+        var artists = Set<String>()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let value = sqlite3_column_text(statement, 0) else { continue }
+            artists.insert(String(cString: value))
+        }
+        return artists
+    }
+
+    func recordArtistArtworkAttempt(artist: String) throws {
+        let statement = try prepare("""
+            INSERT INTO artist_artwork_attempts(artist, attempted_at)
+            VALUES (?, ?)
+            ON CONFLICT(artist) DO UPDATE SET attempted_at = excluded.attempted_at
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(artist, to: statement, index: 1)
+        bind(Date.now.timeIntervalSince1970, to: statement, index: 2)
         try step(statement)
     }
 
@@ -204,7 +233,10 @@ actor LibraryDatabase {
         defer { sqlite3_finalize(statement) }
         bind(playlistID, to: statement, index: 1)
         var tracks: [Track] = []
-        while sqlite3_step(statement) == SQLITE_ROW { tracks.append(readTrack(statement)) }
+        var artworkPool: [Data: Data] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            tracks.append(readTrack(statement, artworkPool: &artworkPool))
+        }
         return tracks
     }
 
@@ -309,6 +341,9 @@ actor LibraryDatabase {
         CREATE TABLE IF NOT EXISTS artist_artwork (
             artist TEXT PRIMARY KEY, artwork BLOB NOT NULL, updated_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS artist_artwork_attempts (
+            artist TEXT PRIMARY KEY, attempted_at REAL NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS play_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             track_id TEXT NOT NULL,
@@ -366,7 +401,11 @@ actor LibraryDatabase {
         """, bindings: [id])
     }
 
-    private func readTrack(_ statement: OpaquePointer, playCountIndex: Int32? = nil) -> Track {
+    private func readTrack(
+        _ statement: OpaquePointer,
+        playCountIndex: Int32? = nil,
+        artworkPool: inout [Data: Data]
+    ) -> Track {
         func text(_ index: Int32) -> String {
             guard let value = sqlite3_column_text(statement, index) else { return "" }
             return String(cString: value)
@@ -374,16 +413,19 @@ actor LibraryDatabase {
         func optionalText(_ index: Int32) -> String? { text(index).isEmpty ? nil : text(index) }
         func optionalInt(_ index: Int32) -> Int? { sqlite3_column_type(statement, index) == SQLITE_NULL ? nil : Int(sqlite3_column_int(statement, index)) }
         func optionalDouble(_ index: Int32) -> Double? { sqlite3_column_type(statement, index) == SQLITE_NULL ? nil : sqlite3_column_double(statement, index) }
-        func data(_ index: Int32) -> Data? {
+        func artworkData(_ index: Int32) -> Data? {
             guard let bytes = sqlite3_column_blob(statement, index) else { return nil }
-            return Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, index)))
+            let loaded = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, index)))
+            if let shared = artworkPool[loaded] { return shared }
+            artworkPool[loaded] = loaded
+            return loaded
         }
 
         return Track(
             id: text(0), url: URL(fileURLWithPath: text(1)), fileName: text(2), title: text(3),
             artist: text(4), albumArtist: text(5), album: text(6), genre: text(7), year: text(8),
             trackNumber: optionalInt(9), discNumber: optionalInt(10), duration: sqlite3_column_double(statement, 11),
-            codec: text(12), bitrate: optionalInt(13), sampleRate: optionalDouble(14), artworkData: data(15),
+            codec: text(12), bitrate: optionalInt(13), sampleRate: optionalDouble(14), artworkData: artworkData(15),
             lyrics: optionalText(16), musicBrainzRecordingID: optionalText(17), musicBrainzReleaseID: optionalText(18),
             acoustID: optionalText(19), addedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 20)),
             modifiedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 21)),
