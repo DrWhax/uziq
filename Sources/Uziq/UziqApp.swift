@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import SwiftUI
 
 @main
@@ -7,6 +8,7 @@ struct UziqApp: App {
     @State private var library = LibraryStore()
     @State private var playback = PlaybackEngine()
     @State private var bandcamp = BandcampStore()
+    @State private var spotify = SpotifyStore()
 
     var body: some Scene {
         WindowGroup("Uziq") {
@@ -14,6 +16,7 @@ struct UziqApp: App {
                 .environment(library)
                 .environment(playback)
                 .environment(bandcamp)
+                .environment(spotify)
                 .frame(minWidth: 980, minHeight: 640)
         }
         .commands {
@@ -24,11 +27,17 @@ struct UziqApp: App {
                 .keyboardShortcut("o", modifiers: [.command, .shift])
             }
             CommandMenu("Playback") {
-                Button("Play / Pause") { playback.toggle() }
+                Button("Play / Pause") {
+                    spotify.isUziqPlaybackActive ? spotify.togglePlayback() : playback.toggle()
+                }
                     .keyboardShortcut(.space, modifiers: [])
-                Button("Previous Track") { playback.previous() }
+                Button("Previous Track") {
+                    spotify.isUziqPlaybackActive ? spotify.previous() : playback.previous()
+                }
                     .keyboardShortcut(.leftArrow, modifiers: [.command])
-                Button("Next Track") { playback.next() }
+                Button("Next Track") {
+                    spotify.isUziqPlaybackActive ? spotify.next() : playback.next()
+                }
                     .keyboardShortcut(.rightArrow, modifiers: [.command])
             }
         }
@@ -38,12 +47,14 @@ struct UziqApp: App {
                 .environment(library)
                 .environment(playback)
                 .environment(bandcamp)
+                .environment(spotify)
         }
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var keyMonitor: Any?
+    private var terminationSignalSources: [DispatchSourceSignal] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // SwiftPM launches an executable rather than a packaged .app. Explicitly
@@ -55,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.applicationIconImage = icon
         }
         NSApp.activate(ignoringOtherApps: true)
+        installTerminationSignalHandlers()
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             guard modifiers.isEmpty else { return event }
@@ -75,11 +87,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        NotificationCenter.default.post(name: .uziqWillTerminate, object: nil)
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        terminationSignalSources.forEach { $0.cancel() }
+        terminationSignalSources.removeAll()
+    }
+
+    private func installTerminationSignalHandlers() {
+        for signalNumber in [SIGINT, SIGTERM] {
+            Darwin.signal(signalNumber, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
+            source.setEventHandler {
+                NSApp.terminate(nil)
+            }
+            source.resume()
+            terminationSignalSources.append(source)
+        }
     }
 }
 
 extension Notification.Name {
     static let uziqTogglePlayback = Notification.Name("uziq.togglePlayback")
     static let uziqTrackPlayed = Notification.Name("uziq.trackPlayed")
+    static let uziqLocalPlaybackStarted = Notification.Name("uziq.localPlaybackStarted")
+    static let uziqWillTerminate = Notification.Name("uziq.willTerminate")
 }

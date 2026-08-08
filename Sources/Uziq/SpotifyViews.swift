@@ -1,0 +1,456 @@
+import AppKit
+import SwiftUI
+
+struct SpotifyLibraryView: View {
+    @Environment(SpotifyStore.self) private var spotify
+    @Environment(PlaybackEngine.self) private var playback
+    @Environment(LibraryStore.self) private var library
+
+    var body: some View {
+        @Bindable var spotify = spotify
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Group {
+                if !spotify.isConfigured {
+                    SpotifyUnavailableView(
+                        title: "Spotify Web API isn’t connected",
+                        detail: "The playback engine is a separate connection. To show playlists and search Spotify here, add a Spotify developer-app Client ID in Settings, then connect your account.",
+                        buttonTitle: "Open Spotify Settings"
+                    ) { library.selectedSection = .settings }
+                } else if !spotify.isAuthorized {
+                    SpotifyUnavailableView(
+                        title: "Connect Spotify",
+                        detail: "Sign in with PKCE to load your playlists and search Spotify's catalog. Your client secret is not needed.",
+                        buttonTitle: "Connect Account"
+                    ) { spotify.logIn() }
+                } else if let selectedPlaylist = spotify.selectedPlaylist {
+                    SpotifyPlaylistDetail(playlist: selectedPlaylist)
+                } else {
+                    SpotifyBrowseView()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .overlay(alignment: .topTrailing) {
+            if spotify.isLoading {
+                ProgressView()
+                    .controlSize(.small)
+                    .padding(.top, 34)
+                    .padding(.trailing, 28)
+            }
+        }
+        .task {
+            spotify.attachPlaybackEngine(playback)
+            if spotify.isAuthorized && spotify.playlists.isEmpty { spotify.loadAccount() }
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .lastTextBaseline, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Spotify")
+                    .font(.system(size: 32, weight: .bold, design: .rounded))
+                Text(spotify.profileName.map { "Connected as \($0)" } ?? "Lightweight Spotify playback through Uziq")
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if spotify.isAuthorized {
+                if spotify.selectedPlaylist != nil {
+                    Button { spotify.closePlaylist() } label: {
+                        Label("Spotify Home", systemImage: "house.fill")
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(spotify.librespot.status == .ready ? .green : .secondary.opacity(0.6))
+                        .frame(width: 7, height: 7)
+                    Text(spotify.librespot.status.title)
+                        .font(.caption.weight(.medium))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(.quaternary, in: Capsule())
+
+                if !spotify.librespot.status.isRunning {
+                    Button("Start Player") { spotify.startPlaybackEngine() }
+                        .buttonStyle(.bordered)
+                        .disabled(spotify.librespot.resolvedExecutableURL == nil)
+                }
+            }
+        }
+        .padding(.horizontal, 28)
+        .padding(.top, 28)
+        .padding(.bottom, 18)
+    }
+}
+
+private struct SpotifyBrowseView: View {
+    @Environment(SpotifyStore.self) private var spotify
+
+    var body: some View {
+        @Bindable var spotify = spotify
+        ScrollView {
+            VStack(alignment: .leading, spacing: 26) {
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search artists, albums, tracks, and playlists", text: $spotify.query)
+                        .textFieldStyle(.plain)
+                        .onSubmit { spotify.search() }
+                    if !spotify.query.isEmpty {
+                        Button { spotify.query = ""; spotify.search() } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Button("Search") { spotify.search() }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(11)
+                .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+
+                SpotifyPlaybackNotice()
+
+                if spotify.needsPersonalLibraryPermission {
+                    HStack(spacing: 14) {
+                        Label("Reconnect Spotify once to add Liked Songs and your artist radio.", systemImage: "person.crop.circle.badge.checkmark")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Reconnect") { spotify.reconnectForPersonalLibrary() }
+                            .buttonStyle(.borderedProminent)
+                    }
+                    .padding(14)
+                    .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+
+                if spotify.likedSongsTotal > 0 || !spotify.playlists.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Your Library")
+                            .font(.title2.weight(.bold))
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 190), spacing: 16)], spacing: 18) {
+                            if spotify.likedSongsTotal > 0 {
+                                SpotifyPlaylistTile(
+                                    item: spotify.likedSongsCollection,
+                                    systemImage: "heart.fill"
+                                ) {
+                                    spotify.openLikedSongs()
+                                }
+                            }
+                            ForEach(spotify.playlists) { playlist in
+                                SpotifyPlaylistTile(item: playlist) {
+                                    spotify.openPlaylist(playlist)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !spotify.topArtists.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Your Artist Radio")
+                            .font(.title2.weight(.bold))
+                        Text("Artists Spotify thinks you’ll want to hear again.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 16) {
+                                ForEach(spotify.topArtists) { artist in
+                                    SpotifyArtistRadioTile(item: artist) {
+                                        spotify.play(artist)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if hasSearchResults {
+                    SpotifyResultSection(title: "Tracks", items: spotify.searchTracks)
+                    SpotifyResultSection(title: "Albums", items: spotify.searchAlbums)
+                    SpotifyResultSection(title: "Artists", items: spotify.searchArtists)
+                    SpotifyResultSection(title: "Playlists", items: spotify.searchPlaylists, opensPlaylists: true)
+                } else if !spotify.query.isEmpty && !spotify.isLoading {
+                    ContentUnavailableView(
+                        "No Spotify results",
+                        systemImage: "magnifyingglass",
+                        description: Text("Try a different artist, album, track, or playlist name.")
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 180)
+                }
+            }
+            .padding(.horizontal, 28)
+            .padding(.bottom, 30)
+        }
+    }
+
+    private var hasSearchResults: Bool {
+        !spotify.searchTracks.isEmpty || !spotify.searchAlbums.isEmpty ||
+            !spotify.searchArtists.isEmpty || !spotify.searchPlaylists.isEmpty
+    }
+}
+
+private struct SpotifyResultSection: View {
+    @Environment(SpotifyStore.self) private var spotify
+    let title: String
+    let items: [SpotifyCatalogItem]
+    var opensPlaylists = false
+
+    var body: some View {
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title)
+                    .font(.title2.weight(.bold))
+                ForEach(items) { item in
+                    SpotifyResultRow(item: item) {
+                        if opensPlaylists {
+                            spotify.openPlaylist(item)
+                        } else {
+                            spotify.play(item)
+                        }
+                    }
+                    Divider()
+                }
+            }
+        }
+    }
+}
+
+private struct SpotifyPlaylistTile: View {
+    let item: SpotifyCatalogItem
+    var systemImage = "rectangle.stack.fill"
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 9) {
+                SpotifyRemoteArtwork(url: item.artworkURL, systemImage: systemImage)
+                    .aspectRatio(1, contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                Text(item.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text(item.itemCount.map { "\($0) items" } ?? item.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct SpotifyArtistRadioTile: View {
+    let item: SpotifyCatalogItem
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 9) {
+                SpotifyRemoteArtwork(url: item.artworkURL, systemImage: "person.fill")
+                    .frame(width: 132, height: 132)
+                    .clipShape(Circle())
+                Text(item.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                Label("Play radio", systemImage: "dot.radiowaves.left.and.right")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: 132, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct SpotifyResultRow: View {
+    @Environment(SpotifyStore.self) private var spotify
+    let item: SpotifyCatalogItem
+    let primaryAction: () -> Void
+
+    var body: some View {
+        HStack(spacing: 13) {
+            SpotifyRemoteArtwork(url: item.artworkURL, systemImage: item.kind.systemImage)
+                .frame(width: 56, height: 56)
+                .clipShape(RoundedRectangle(cornerRadius: item.kind == .artist ? 28 : 8, style: .continuous))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text(item.subtitle)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(item.kind.title)
+                    if let duration = item.durationText { Text("· \(duration)") }
+                    if let count = item.itemCount { Text("· \(count) items") }
+                }
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            }
+            Spacer()
+            if item.kind == .playlist {
+                Button("View", action: primaryAction)
+                    .buttonStyle(.bordered)
+            }
+            Button {
+                if item.kind == .playlist {
+                    spotify.play(item)
+                } else {
+                    primaryAction()
+                }
+            } label: {
+                if spotify.isStartingPlayback {
+                    ProgressView().controlSize(.small).frame(width: 44)
+                } else {
+                    Label("Play", systemImage: "play.fill").frame(minWidth: 44)
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(spotify.isStartingPlayback || item.uri.isEmpty)
+            Button("Open") {
+                if let url = spotifyWebURL(for: item.uri) { NSWorkspace.shared.open(url) }
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+private struct SpotifyPlaylistDetail: View {
+    @Environment(SpotifyStore.self) private var spotify
+    let playlist: SpotifyCatalogItem
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                SpotifyPlaybackNotice()
+
+                HStack(spacing: 20) {
+                    SpotifyRemoteArtwork(
+                        url: playlist.artworkURL,
+                        systemImage: playlist.id == SpotifyStore.likedSongsID ? "heart.fill" : "rectangle.stack.fill"
+                    )
+                        .frame(width: 150, height: 150)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    VStack(alignment: .leading, spacing: 8) {
+                        Button { spotify.closePlaylist() } label: {
+                            Label("Back to Spotify", systemImage: "chevron.left")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        Text(playlist.name)
+                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                        Text(playlist.subtitle)
+                            .foregroundStyle(.secondary)
+                        Button { spotify.playCollection(playlist) } label: {
+                            Label("Play Playlist", systemImage: "play.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+
+                if spotify.playlistTracks.isEmpty && !spotify.isLoading {
+                    ContentUnavailableView(
+                        "Tracks unavailable",
+                        systemImage: "lock",
+                        description: Text("Spotify Development Mode only exposes item lists for playlists you own or collaborate on. You can still play or open this playlist.")
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 180)
+                } else {
+                    LazyVStack(spacing: 0) {
+                        ForEach(spotify.playlistTracks) { track in
+                            SpotifyResultRow(item: track) { spotify.play(track, in: playlist) }
+                            Divider()
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 28)
+            .padding(.bottom, 30)
+        }
+    }
+}
+
+private struct SpotifyPlaybackNotice: View {
+    @Environment(SpotifyStore.self) private var spotify
+    @Environment(PlaybackEngine.self) private var playback
+
+    var body: some View {
+        if let message = spotify.playbackMessage {
+            Label(message, systemImage: "dot.radiowaves.left.and.right")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        if let error = spotify.error {
+            Label(error, systemImage: "exclamationmark.triangle")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .textSelection(.enabled)
+        }
+        if let audioError = playback.spotifyAudioError {
+            Label(audioError, systemImage: "speaker.slash")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .textSelection(.enabled)
+        } else if spotify.isUziqPlaybackActive && playback.isSpotifyPCMActive && playback.spotifyReceivedByteCount == 0 {
+            Label("Spotify is playing, but Uziq is still waiting for decoded audio from librespot…", systemImage: "waveform.badge.exclamationmark")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct SpotifyUnavailableView: View {
+    let title: String
+    let detail: String
+    let buttonTitle: String
+    let action: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "music.note.house.fill")
+                .font(.system(size: 52, weight: .light))
+                .foregroundStyle(.green)
+            Text(title).font(.title2.weight(.semibold))
+            Text(detail)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 500)
+            Button(buttonTitle, action: action)
+                .buttonStyle(.borderedProminent)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(28)
+    }
+}
+
+struct SpotifyRemoteArtwork: View {
+    let url: URL?
+    let systemImage: String
+
+    var body: some View {
+        AsyncImage(url: url) { phase in
+            if case .success(let image) = phase {
+                image.resizable().scaledToFill()
+            } else {
+                ZStack {
+                    LinearGradient(colors: [.green.opacity(0.65), .black.opacity(0.8)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    Image(systemName: systemImage)
+                        .font(.system(size: 28, weight: .light))
+                        .foregroundStyle(.white.opacity(0.9))
+                }
+            }
+        }
+        .clipped()
+    }
+}
+
+private func spotifyWebURL(for uri: String) -> URL? {
+    let components = uri.split(separator: ":")
+    guard components.count == 3, components[0] == "spotify" else { return nil }
+    return URL(string: "https://open.spotify.com/\(components[1])/\(components[2])")
+}

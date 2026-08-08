@@ -5,7 +5,11 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @Environment(LibraryStore.self) private var library
     @Environment(PlaybackEngine.self) private var playback
+    @Environment(BandcampStore.self) private var bandcamp
+    @Environment(SpotifyStore.self) private var spotify
     @State private var showingNowPlaying = false
+    @State private var globalSearchText = ""
+    @State private var searchProvider: SearchProvider = .local
 
     var body: some View {
         @Bindable var library = library
@@ -30,11 +34,22 @@ struct ContentView: View {
                 ScanStatusView(message: scanMessage)
             }
         }
-        .searchable(text: $library.searchText, placement: .toolbar, prompt: "Search titles, artists, albums")
-        .onChange(of: library.searchText) { _, _ in
+        .searchable(text: $globalSearchText, placement: .toolbar, prompt: "Search music")
+        .searchScopes($searchProvider) {
+            ForEach(SearchProvider.allCases) { provider in
+                Text(provider.title).tag(provider)
+            }
+        }
+        .onSubmit(of: .search) {
+            performGlobalSearch()
+        }
+        .onChange(of: globalSearchText) { _, newValue in
+            guard searchProvider == .local else { return }
+            library.searchText = newValue
             Task { await library.refresh() }
         }
         .onChange(of: library.selectedSection) { _, _ in
+            synchronizeSearchProvider()
             Task { await library.refresh() }
         }
         .onChange(of: library.mostPlayedRange) { _, _ in
@@ -61,6 +76,42 @@ struct ContentView: View {
                 .environment(library)
                 .environment(playback)
         }
+        .task {
+            spotify.attachPlaybackEngine(playback)
+            synchronizeSearchProvider()
+        }
+    }
+
+    private func performGlobalSearch() {
+        switch searchProvider {
+        case .local:
+            library.searchText = globalSearchText
+            Task { await library.refresh() }
+        case .bandcamp:
+            bandcamp.query = globalSearchText
+            library.selectedSection = .bandcamp
+            bandcamp.search()
+        case .spotify:
+            spotify.query = globalSearchText
+            library.selectedSection = .spotify
+            spotify.search()
+        }
+    }
+
+    private func synchronizeSearchProvider() {
+        switch library.selectedSection {
+        case .bandcamp:
+            searchProvider = .bandcamp
+            globalSearchText = bandcamp.query
+        case .spotify:
+            searchProvider = .spotify
+            globalSearchText = spotify.query
+        case .settings:
+            break
+        default:
+            searchProvider = .local
+            globalSearchText = library.searchText
+        }
     }
 }
 
@@ -81,8 +132,9 @@ struct SidebarView: View {
                 }
             }
             Section {
-                Label(LibrarySection.bandcamp.title, systemImage: LibrarySection.bandcamp.systemImage)
-                    .tag(LibrarySection.bandcamp)
+                ForEach([LibrarySection.bandcamp, .spotify], id: \.self) { section in
+                    Label(section.title, systemImage: section.systemImage).tag(section)
+                }
             }
             Section {
                 Label(LibrarySection.settings.title, systemImage: LibrarySection.settings.systemImage)
@@ -113,6 +165,8 @@ struct LibraryContentView: View {
                 PlaylistsLibraryView()
             } else if library.selectedSection == .bandcamp {
                 BandcampLibraryView()
+            } else if library.selectedSection == .spotify {
+                SpotifyLibraryView()
             } else if library.tracks.isEmpty && library.selectedSection != .mostPlayed {
                 EmptyLibraryView()
             } else {
@@ -131,6 +185,8 @@ struct LibraryContentView: View {
                     TrackListView()
                 case .bandcamp:
                     BandcampLibraryView()
+                case .spotify:
+                    SpotifyLibraryView()
                 case .settings:
                     SettingsView()
                 }
@@ -1034,26 +1090,33 @@ struct MiniPlayerView: View {
     @Environment(PlaybackEngine.self) private var playback
     @Environment(LibraryStore.self) private var library
     @Environment(BandcampStore.self) private var bandcamp
+    @Environment(SpotifyStore.self) private var spotify
     let onOpen: () -> Void
 
     var body: some View {
         VStack(spacing: 10) {
             ZStack {
                 HStack(spacing: 18) {
-                    Button(action: onOpen) {
+                    Button(action: openCurrentPlayer) {
                         HStack(spacing: 14) {
-                            ArtworkView(data: playback.currentTrack?.artworkData)
-                                .frame(width: 64, height: 64)
-                                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            Group {
+                                if spotify.isUziqPlaybackActive {
+                                    SpotifyRemoteArtwork(url: spotify.playback?.artworkURL, systemImage: "music.note")
+                                } else {
+                                    ArtworkView(data: playback.currentTrack?.artworkData)
+                                }
+                            }
+                            .frame(width: 64, height: 64)
+                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(playback.currentTrack?.displayTitle ?? "Nothing playing")
+                                Text(currentTitle)
                                     .font(.headline)
                                     .lineLimit(1)
-                                Text(playback.currentTrack?.displayArtist ?? "Choose a track from your library")
+                                Text(currentArtist)
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
-                                Text(playback.currentTrack?.displayAlbum ?? "")
+                                Text(currentAlbum)
                                     .font(.caption)
                                     .foregroundStyle(.tertiary)
                                     .lineLimit(1)
@@ -1074,10 +1137,11 @@ struct MiniPlayerView: View {
                                 .background(.quaternary, in: Circle())
                         }
                         .buttonStyle(.plain)
-                        .disabled(playback.currentTrack == nil)
+                        .disabled(playback.currentTrack == nil || spotify.isUziqPlaybackActive)
+                        .opacity(spotify.isUziqPlaybackActive ? 0 : 1)
                         .help(isCurrentTrackLiked ? "Unlike track" : "Like track")
 
-                        Button(action: onOpen) {
+                        Button(action: openCurrentPlayer) {
                             Image(systemName: "rectangle.expand.vertical")
                                 .frame(width: 34, height: 34)
                                 .background(.quaternary, in: Circle())
@@ -1090,25 +1154,37 @@ struct MiniPlayerView: View {
                 PlayerTransportControls()
             }
 
-            HStack(spacing: 10) {
-                Text(formatTime(playback.currentTime))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 42, alignment: .leading)
+            TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
+                HStack(spacing: 10) {
+                    Text(formatTime(currentTime(at: timeline.date)))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 42, alignment: .leading)
 
-                WaveformView(
-                    url: playback.currentTrack?.url,
-                    progress: playback.duration > 0 ? playback.currentTime / playback.duration : 0,
-                    duration: playback.duration
-                ) { seconds in
-                    playback.seek(to: seconds)
+                    Group {
+                        if spotify.isUziqPlaybackActive, let current = spotify.playback {
+                            StreamingWaveformView(
+                                seed: current.itemID,
+                                progress: current.duration > 0 ? current.effectiveProgress(at: timeline.date) / current.duration : 0,
+                                duration: current.duration
+                            ) { spotify.seek(to: $0) }
+                        } else {
+                            WaveformView(
+                                url: playback.currentTrack?.url,
+                                progress: playback.duration > 0 ? playback.currentTime / playback.duration : 0,
+                                duration: playback.duration
+                            ) { seconds in
+                                playback.seek(to: seconds)
+                            }
+                        }
+                    }
+                    .frame(height: 28)
+
+                    Text(formatTime(currentDuration))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 42, alignment: .trailing)
                 }
-                .frame(height: 28)
-
-                Text(formatTime(playback.duration))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 42, alignment: .trailing)
             }
 
         }
@@ -1120,6 +1196,42 @@ struct MiniPlayerView: View {
     private func formatTime(_ seconds: Double) -> String {
         guard seconds.isFinite else { return "0:00" }
         return String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60)
+    }
+
+    private var currentTitle: String {
+        spotify.isUziqPlaybackActive
+            ? spotify.playback?.title ?? "Spotify"
+            : playback.currentTrack?.displayTitle ?? "Nothing playing"
+    }
+
+    private var currentArtist: String {
+        spotify.isUziqPlaybackActive
+            ? spotify.playback?.artist ?? "Spotify"
+            : playback.currentTrack?.displayArtist ?? "Choose a track from your library"
+    }
+
+    private var currentAlbum: String {
+        spotify.isUziqPlaybackActive
+            ? spotify.playback?.album ?? ""
+            : playback.currentTrack?.displayAlbum ?? ""
+    }
+
+    private var currentDuration: Double {
+        spotify.isUziqPlaybackActive ? spotify.playback?.duration ?? 0 : playback.duration
+    }
+
+    private func currentTime(at date: Date) -> Double {
+        spotify.isUziqPlaybackActive
+            ? spotify.playback?.effectiveProgress(at: date) ?? 0
+            : playback.currentTime
+    }
+
+    private func openCurrentPlayer() {
+        if spotify.isUziqPlaybackActive {
+            library.selectedSection = .spotify
+        } else {
+            onOpen()
+        }
     }
 
     private var isCurrentTrackLiked: Bool {
@@ -1141,12 +1253,17 @@ struct MiniPlayerView: View {
 
 struct PlayerTransportControls: View {
     @Environment(PlaybackEngine.self) private var playback
+    @Environment(SpotifyStore.self) private var spotify
 
     var body: some View {
         HStack(spacing: 12) {
-            transportButton("backward.fill", size: 36) { playback.previous() }
-            Button { playback.toggle() } label: {
-                Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
+            transportButton("backward.fill", size: 36) {
+                spotify.isUziqPlaybackActive ? spotify.previous() : playback.previous()
+            }
+            Button {
+                spotify.isUziqPlaybackActive ? spotify.togglePlayback() : playback.toggle()
+            } label: {
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                     .font(.system(size: 17, weight: .bold))
                     .foregroundStyle(.white)
                     .frame(width: 48, height: 48)
@@ -1154,9 +1271,15 @@ struct PlayerTransportControls: View {
                     .shadow(color: Color.accentColor.opacity(0.3), radius: 8, y: 3)
             }
             .buttonStyle(.plain)
-            transportButton("forward.fill", size: 36) { playback.next() }
+            transportButton("forward.fill", size: 36) {
+                spotify.isUziqPlaybackActive ? spotify.next() : playback.next()
+            }
         }
-        .disabled(playback.currentTrack == nil)
+        .disabled(playback.currentTrack == nil && !spotify.isUziqPlaybackActive)
+    }
+
+    private var isPlaying: Bool {
+        spotify.isUziqPlaybackActive ? spotify.playback?.isPlaying == true : playback.isPlaying
     }
 
     private func transportButton(_ image: String, size: CGFloat, action: @escaping () -> Void) -> some View {
@@ -1167,6 +1290,63 @@ struct PlayerTransportControls: View {
                 .background(.quaternary, in: Circle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+struct StreamingWaveformView: View {
+    let seed: String
+    let progress: Double
+    let duration: Double
+    let onSeek: (Double) -> Void
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                HStack(alignment: .center, spacing: 1.5) {
+                    ForEach(0..<64, id: \.self) { index in
+                        Capsule()
+                            .fill(index < playedBarCount ? Color.accentColor : Color.secondary.opacity(0.28))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 4 + deterministicHeight(index) * 20)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if duration > 0 {
+                    Capsule()
+                        .fill(.primary)
+                        .frame(width: 2.5, height: 28)
+                        .shadow(color: .black.opacity(0.25), radius: 1)
+                        .offset(x: max(0, min(geometry.size.width - 2.5, geometry.size.width * clampedProgress)))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        guard duration > 0, geometry.size.width > 0 else { return }
+                        let fraction = min(1, max(0, value.location.x / geometry.size.width))
+                        onSeek(duration * fraction)
+                    }
+            )
+        }
+        .animation(.linear(duration: 0.18), value: progress)
+    }
+
+    private var clampedProgress: Double {
+        min(1, max(0, progress.isFinite ? progress : 0))
+    }
+
+    private var playedBarCount: Int {
+        Int(64 * clampedProgress)
+    }
+
+    private func deterministicHeight(_ index: Int) -> CGFloat {
+        var hasher = Hasher()
+        hasher.combine(seed)
+        hasher.combine(index)
+        return CGFloat(abs(hasher.finalize() % 100)) / 100
     }
 }
 
@@ -1260,6 +1440,7 @@ struct SettingsView: View {
     @Environment(LibraryStore.self) private var library
     @Environment(PlaybackEngine.self) private var playback
     @Environment(BandcampStore.self) private var bandcamp
+    @Environment(SpotifyStore.self) private var spotify
 
     var body: some View {
         Form {
@@ -1321,7 +1502,7 @@ struct SettingsView: View {
                     }
                 }
                 .disabled(!playback.equalizerEnabled)
-                Text("Ten-band equalization is applied to local files and cached Bandcamp playback.")
+                Text("Ten-band equalization is applied to local files and cached Bandcamp playback. Spotify uses librespot’s native CoreAudio output for stable streaming.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1349,6 +1530,75 @@ struct SettingsView: View {
                 Text("Bandcamp audio that has not been played for seven days is removed automatically. Cleanup runs when Uziq starts and once per day while it remains open.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+            Section("Spotify") {
+                VStack(alignment: .leading, spacing: 5) {
+                    Label("Catalog and playlists", systemImage: "rectangle.stack.badge.play")
+                        .font(.headline)
+                    Text("This Web API connection supplies the Spotify page, search results, playlists, and playback controls.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                TextField("Spotify Client ID", text: Binding(
+                    get: { spotify.clientID },
+                    set: { spotify.clientID = $0 }
+                ))
+                Text("Add \(SpotifyStore.redirectURI.absoluteString) as a Redirect URI in your Spotify developer app. PKCE is used, so Uziq never needs your client secret.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+
+                if !spotify.isConfigured {
+                    Label("Enter a Client ID above before connecting. Librespot’s login cannot provide playlists or catalog search.", systemImage: "exclamationmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Link("Open Spotify Developer Dashboard", destination: URL(string: "https://developer.spotify.com/dashboard")!)
+                }
+
+                HStack {
+                    if spotify.isAuthorized {
+                        Label(spotify.profileName ?? "Connected", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Spacer()
+                        Button("Disconnect", role: .destructive) { spotify.logOut() }
+                    } else {
+                        Button("Connect Spotify Account") { spotify.logIn() }
+                            .disabled(!spotify.isConfigured)
+                    }
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Label("Audio playback engine", systemImage: "waveform")
+                        .font(.headline)
+                    Text("Librespot makes Uziq appear as a Spotify Connect device and plays through its native CoreAudio backend.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    TextField("librespot executable", text: Binding(
+                        get: { spotify.librespot.executablePath },
+                        set: { spotify.librespot.executablePath = $0 }
+                    ))
+                    Button("Choose…") { chooseLibrespotExecutable() }
+                }
+                HStack {
+                    Label(spotify.librespot.status.title, systemImage: spotify.librespot.status.isRunning ? "wave.3.right.circle.fill" : "wave.3.right.circle")
+                        .foregroundStyle(spotify.librespot.status == .ready ? .green : .secondary)
+                    Spacer()
+                    if spotify.librespot.status.isRunning {
+                        Button("Stop Engine") { spotify.librespot.stop() }
+                    } else {
+                        Button("Start Engine") { spotify.startPlaybackEngine() }
+                            .disabled(spotify.librespot.resolvedExecutableURL == nil)
+                    }
+                }
+                Text("Install the lightweight playback engine with `cargo install librespot --version 0.8.0`. Its first start opens a separate Spotify login. Spotify uses librespot’s native output for reliable buffering and track changes; audio caching is disabled.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             }
             Section("Metadata") {
                 Text("Embedded tags and artwork are used first. Missing album covers are looked up from MusicBrainz and the Cover Art Archive in the background.")
@@ -1387,5 +1637,16 @@ struct SettingsView: View {
     private var cacheSummary: String {
         let size = ByteCountFormatter.string(fromByteCount: bandcamp.cacheBytes, countStyle: .file)
         return "\(size) · \(bandcamp.cachedFileCount) \(bandcamp.cachedFileCount == 1 ? "file" : "files")"
+    }
+
+    private func chooseLibrespotExecutable() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose librespot"
+        if panel.runModal() == .OK, let url = panel.url {
+            spotify.librespot.executablePath = url.path
+        }
     }
 }

@@ -1,6 +1,6 @@
 # Uziq
 
-Uziq is a modern macOS SwiftUI music player focused on large local libraries. It recursively scans persistent folder roots, reads embedded metadata, indexes titles/artists/albums with SQLite FTS5, and plays local audio through AVFoundation.
+Uziq is a modern macOS SwiftUI music player for large local libraries, Bandcamp discovery, and lightweight Spotify playback. It recursively scans persistent folder roots, reads embedded metadata, indexes titles/artists/albums with SQLite FTS5, and sends playback through an AVFoundation audio engine with a ten-band equalizer.
 
 ## Run
 
@@ -19,7 +19,20 @@ The app targets macOS 15 or newer.
 - Recursive audio scanning
 - SQLite library and full-text search
 - Embedded metadata, artwork, and lyrics extraction
-- AVQueuePlayer playback with queue controls
+- AVAudioEngine playback with queue controls, waveform seeking, and equalization
+- Bandcamp search, subscriptions, streaming, favorites, and expiring audio cache
+- Spotify PKCE login, personal library, catalog search, and playback through librespot's native CoreAudio output
+- Local / Bandcamp / Spotify global-search scopes
 - Light/dark system appearance support
 
-The external MusicBrainz/AcoustID and lyrics provider adapters are intentionally isolated for the next implementation slice. Bandcamp does not provide a general public catalog/streaming API; the app should use official integrations only and may link out to Bandcamp while that provider is researched.
+## Spotify setup
+
+Spotify playback requires a Premium account and two one-time browser logins:
+
+1. Create an app in the Spotify Developer Dashboard.
+2. Add `http://127.0.0.1:8989/callback` to its Redirect URIs.
+3. Enter the app's Client ID under Uziq Settings → Spotify and connect the account. Uziq uses PKCE and does not need the client secret.
+4. Install the playback helper with `cargo install librespot --version 0.8.0 --locked`.
+5. Start the Spotify playback engine from Settings or the Spotify section. librespot opens its own login the first time and stores the reusable credential under Uziq's Application Support directory.
+
+librespot is an unofficial, reverse-engineered Spotify client. Spotify may change its protocol, and its maintainers warn that its use may be forbidden by Spotify. Uziq disables librespot's audio cache and only retains its authentication credential. SpotifyAPI is pinned to a reviewed revision for reproducible builds.

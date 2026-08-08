@@ -45,9 +45,15 @@ final class PlaybackEngine {
     var currentTime = 0.0
     var duration = 0.0
     var volume: Float = 1.0 {
-        didSet { playerNode.volume = volume }
+        didSet {
+            playerNode.volume = volume
+            spotifyPlayerNode.volume = volume
+        }
     }
     var queue: [Track] = []
+    private(set) var isSpotifyPCMActive = false
+    private(set) var spotifyReceivedByteCount = 0
+    private(set) var spotifyAudioError: String?
     var equalizerEnabled: Bool {
         didSet {
             applyEqualizerSettings()
@@ -61,6 +67,8 @@ final class PlaybackEngine {
 
     @ObservationIgnored private let audioEngine = AVAudioEngine()
     @ObservationIgnored private let playerNode = AVAudioPlayerNode()
+    @ObservationIgnored private let spotifyPlayerNode = AVAudioPlayerNode()
+    @ObservationIgnored private let sourceMixer = AVAudioMixerNode()
     @ObservationIgnored private let equalizer = AVAudioUnitEQ(numberOfBands: 10)
     @ObservationIgnored private var audioFile: AVAudioFile?
     @ObservationIgnored private var startingFrame: AVAudioFramePosition = 0
@@ -72,6 +80,14 @@ final class PlaybackEngine {
     @ObservationIgnored private var nextTrackProvider: (@MainActor () async -> Track?)?
     @ObservationIgnored private var prefetchTask: Task<Void, Never>?
     @ObservationIgnored private var isWaitingForNextTrack = false
+    @ObservationIgnored private var spotifyPCMBytes = Data()
+    @ObservationIgnored private var spotifyScheduledBuffers: [UUID: AVAudioPCMBuffer] = [:]
+    @ObservationIgnored private var spotifyShouldPlay = true
+    @ObservationIgnored private var spotifyHasStartedPlayback = false
+    @ObservationIgnored private var spotifyIsWaitingForTransition = false
+
+    private let spotifyFramesPerBuffer = 4_096
+    private let spotifyPrebufferCount = 4
 
     init() {
         let defaults = UserDefaults.standard
@@ -84,10 +100,21 @@ final class PlaybackEngine {
         equalizerPreset = EqualizerPreset(rawValue: defaults.string(forKey: "equalizer-preset") ?? "") ?? .flat
 
         audioEngine.attach(playerNode)
+        audioEngine.attach(spotifyPlayerNode)
+        audioEngine.attach(sourceMixer)
         audioEngine.attach(equalizer)
-        audioEngine.connect(playerNode, to: equalizer, format: nil)
+        audioEngine.connect(playerNode, to: sourceMixer, fromBus: 0, toBus: 0, format: nil)
+        audioEngine.connect(
+            spotifyPlayerNode,
+            to: sourceMixer,
+            fromBus: 0,
+            toBus: 1,
+            format: SpotifyPCMConverter.outputFormat
+        )
+        audioEngine.connect(sourceMixer, to: equalizer, format: nil)
         audioEngine.connect(equalizer, to: audioEngine.mainMixerNode, format: nil)
         playerNode.volume = volume
+        spotifyPlayerNode.volume = volume
         configureEqualizerBands()
         applyEqualizerSettings()
         try? startAudioEngine()
@@ -109,10 +136,13 @@ final class PlaybackEngine {
         prefetchTask?.cancel()
         if let toggleObserver { NotificationCenter.default.removeObserver(toggleObserver) }
         playerNode.stop()
+        spotifyPlayerNode.stop()
         audioEngine.stop()
     }
 
     func play(_ track: Track, in tracks: [Track]? = nil) {
+        if isSpotifyPCMActive { endSpotifyPCMStream() }
+        NotificationCenter.default.post(name: .uziqLocalPlaybackStarted, object: nil)
         resetStreamingQueue()
         queue = tracks ?? [track]
         let requestedIndex = queue.firstIndex(of: track) ?? 0
@@ -127,6 +157,8 @@ final class PlaybackEngine {
         _ track: Track,
         nextTrackProvider: @escaping @MainActor () async -> Track?
     ) {
+        if isSpotifyPCMActive { endSpotifyPCMStream() }
+        NotificationCenter.default.post(name: .uziqLocalPlaybackStarted, object: nil)
         resetStreamingQueue()
         queue = [track]
         self.nextTrackProvider = nextTrackProvider
@@ -134,8 +166,13 @@ final class PlaybackEngine {
         startTrack(at: 0)
     }
 
+    func stopForExternalSpotifyPlayback() {
+        if isSpotifyPCMActive { endSpotifyPCMStream() }
+        stopPlayback()
+    }
+
     func toggle() {
-        guard currentTrack != nil else { return }
+        guard currentTrack != nil, !isSpotifyPCMActive else { return }
         if isPlaying {
             playerNode.pause()
             isPlaying = false
@@ -152,7 +189,7 @@ final class PlaybackEngine {
     }
 
     func seek(to seconds: Double) {
-        guard let audioFile else { return }
+        guard let audioFile, !isSpotifyPCMActive else { return }
         let safeSeconds = seconds.isFinite ? max(0, seconds) : 0
         let value = min(safeSeconds, duration > 0 ? duration : safeSeconds)
         let frame = min(totalFrames, max(0, AVAudioFramePosition(value * sampleRate)))
@@ -187,6 +224,140 @@ final class PlaybackEngine {
         startTrack(at: previousIndex)
     }
 
+    func beginSpotifyPCMStream() {
+        guard !isSpotifyPCMActive else { return }
+        resetStreamingQueue()
+        scheduleGeneration += 1
+        playerNode.stop()
+        spotifyPlayerNode.stop()
+        audioFile = nil
+        currentTrack = nil
+        currentTime = 0
+        duration = 0
+        spotifyPCMBytes.removeAll(keepingCapacity: true)
+        spotifyScheduledBuffers.removeAll(keepingCapacity: true)
+        spotifyReceivedByteCount = 0
+        spotifyAudioError = nil
+        spotifyShouldPlay = true
+        spotifyHasStartedPlayback = false
+        spotifyIsWaitingForTransition = false
+        isSpotifyPCMActive = true
+        do {
+            try startAudioEngine()
+        } catch {
+            spotifyAudioError = "Could not start the audio engine: \(error.localizedDescription)"
+        }
+    }
+
+    func enqueueSpotifyPCM(_ data: Data) {
+        guard isSpotifyPCMActive,
+              !spotifyIsWaitingForTransition,
+              !data.isEmpty else { return }
+        spotifyReceivedByteCount += data.count
+        spotifyPCMBytes.append(data)
+        let bytesPerBuffer = spotifyFramesPerBuffer * SpotifyPCMConverter.bytesPerFrame
+        while spotifyPCMBytes.count >= bytesPerBuffer {
+            guard let converted = SpotifyPCMConverter.makeBuffer(
+                from: spotifyPCMBytes,
+                maximumFrameCount: spotifyFramesPerBuffer
+            ) else { break }
+
+            spotifyPCMBytes.removeFirst(converted.consumedBytes)
+            let bufferID = UUID()
+            spotifyScheduledBuffers[bufferID] = converted.buffer
+            spotifyPlayerNode.scheduleBuffer(converted.buffer, completionCallbackType: .dataConsumed) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.spotifyScheduledBuffers.removeValue(forKey: bufferID)
+                }
+            }
+        }
+        guard !spotifyScheduledBuffers.isEmpty else { return }
+        if !audioEngine.isRunning {
+            do {
+                try startAudioEngine()
+            } catch {
+                spotifyAudioError = "Could not restart the audio engine: \(error.localizedDescription)"
+                return
+            }
+        }
+        if spotifyShouldPlay,
+           !spotifyHasStartedPlayback,
+           spotifyScheduledBuffers.count >= spotifyPrebufferCount {
+            spotifyHasStartedPlayback = true
+            spotifyPlayerNode.play()
+        } else if spotifyShouldPlay,
+                  spotifyHasStartedPlayback,
+                  !spotifyPlayerNode.isPlaying {
+            spotifyPlayerNode.play()
+        }
+    }
+
+    func handleSpotifyPlayerEvent(_ event: LibrespotPlayerEvent) {
+        guard isSpotifyPCMActive else { return }
+        switch event {
+        case .trackChanged, .seeked:
+            guard spotifyIsWaitingForTransition else { return }
+            spotifyIsWaitingForTransition = false
+            spotifyShouldPlay = true
+        case .playing:
+            spotifyIsWaitingForTransition = false
+            spotifyShouldPlay = true
+            if spotifyHasStartedPlayback,
+               !spotifyScheduledBuffers.isEmpty,
+               !spotifyPlayerNode.isPlaying {
+                spotifyPlayerNode.play()
+            }
+        case .paused:
+            spotifyShouldPlay = false
+            spotifyPlayerNode.pause()
+        case .stopped:
+            spotifyShouldPlay = false
+            spotifyPlayerNode.pause()
+        }
+    }
+
+    func prepareForSpotifyTransition() {
+        guard isSpotifyPCMActive else { return }
+        spotifyIsWaitingForTransition = true
+        spotifyShouldPlay = false
+        resetSpotifyPCMQueue()
+    }
+
+    func setSpotifyPCMPlaying(_ shouldPlay: Bool) {
+        guard isSpotifyPCMActive else { return }
+        spotifyShouldPlay = shouldPlay
+        if shouldPlay {
+            if spotifyHasStartedPlayback,
+               !spotifyScheduledBuffers.isEmpty,
+               !spotifyPlayerNode.isPlaying {
+                spotifyPlayerNode.play()
+            }
+        } else {
+            spotifyPlayerNode.pause()
+        }
+    }
+
+    func endSpotifyPCMStream() {
+        guard isSpotifyPCMActive else { return }
+        scheduleGeneration += 1
+        spotifyPlayerNode.stop()
+        spotifyPCMBytes.removeAll(keepingCapacity: false)
+        spotifyScheduledBuffers.removeAll(keepingCapacity: false)
+        spotifyShouldPlay = false
+        spotifyHasStartedPlayback = false
+        spotifyIsWaitingForTransition = false
+        isSpotifyPCMActive = false
+        isPlaying = false
+    }
+
+    private func resetSpotifyPCMQueue() {
+        spotifyPlayerNode.stop()
+        spotifyPCMBytes.removeAll(keepingCapacity: true)
+        spotifyScheduledBuffers.removeAll(keepingCapacity: true)
+        spotifyReceivedByteCount = 0
+        spotifyHasStartedPlayback = false
+    }
+
     func setEqualizerGain(_ gain: Float, at index: Int) {
         guard equalizerGains.indices.contains(index) else { return }
         equalizerGains[index] = min(12, max(-12, gain))
@@ -204,6 +375,7 @@ final class PlaybackEngine {
     }
 
     private func startTrack(at index: Int) {
+        isSpotifyPCMActive = false
         guard index >= 0, index < queue.count, fileExists(queue[index]) else {
             guard let nextIndex = firstAvailableIndex(startingAt: index + 1) else {
                 stopPlayback()
@@ -285,7 +457,7 @@ final class PlaybackEngine {
     }
 
     private func updateProgress() {
-        guard currentTrack != nil else { return }
+        guard currentTrack != nil, !isSpotifyPCMActive else { return }
         if let renderTime = playerNode.lastRenderTime,
            let playerTime = playerNode.playerTime(forNodeTime: renderTime) {
             let renderedFrame = max(0, playerTime.sampleTime)

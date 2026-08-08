@@ -9,6 +9,7 @@ enum LibrarySection: String, CaseIterable, Identifiable {
     case mostPlayed
     case recentlyAdded
     case bandcamp
+    case spotify
     case settings
 
     var id: String { rawValue }
@@ -23,6 +24,7 @@ enum LibrarySection: String, CaseIterable, Identifiable {
         case .mostPlayed: "Most Played"
         case .recentlyAdded: "Recently Added"
         case .bandcamp: "Bandcamp"
+        case .spotify: "Spotify"
         case .settings: "Settings"
         }
     }
@@ -37,6 +39,7 @@ enum LibrarySection: String, CaseIterable, Identifiable {
         case .mostPlayed: "chart.bar.fill"
         case .recentlyAdded: "clock"
         case .bandcamp: "dot.radiowaves.left.and.right"
+        case .spotify: "music.note.house.fill"
         case .settings: "gearshape"
         }
     }

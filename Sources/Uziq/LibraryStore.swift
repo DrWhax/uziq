@@ -79,7 +79,7 @@ final class LibraryStore {
         switch selectedSection {
         case .recentlyAdded:
             return Array(tracks.sorted { $0.addedAt > $1.addedAt }.prefix(100))
-        case .artists, .albums, .genres, .playlists, .mostPlayed, .bandcamp, .library, .settings:
+        case .artists, .albums, .genres, .playlists, .mostPlayed, .bandcamp, .spotify, .library, .settings:
             return tracks
         }
     }
