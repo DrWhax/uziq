@@ -1,7 +1,112 @@
 import XCTest
+import SQLite3
 @testable import Uziq
 
 final class LibraryDatabaseTests: XCTestCase {
+    func testPersistentDatabaseEnablesWALForeignKeysAndCurrentSchema() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("uziq-database-health-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let database = LibraryDatabase(databaseURL: directory.appendingPathComponent("library.sqlite"))
+        let health = try await database.health()
+
+        XCTAssertEqual(health.schemaVersion, LibraryDatabase.currentSchemaVersion)
+        XCTAssertTrue(health.foreignKeysEnabled)
+        XCTAssertEqual(health.journalMode.lowercased(), "wal")
+    }
+
+    func testLegacyUnversionedDatabaseMigratesWithoutLosingTracks() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("uziq-legacy-migration-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("library.sqlite")
+        let trackPath = directory.appendingPathComponent("legacy-song.mp3").path
+
+        try executeSQLite(at: databaseURL, sql: """
+            CREATE TABLE tracks (
+                id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, file_name TEXT NOT NULL,
+                title TEXT NOT NULL, artist TEXT NOT NULL, album_artist TEXT NOT NULL,
+                album TEXT NOT NULL, genre TEXT NOT NULL, year TEXT NOT NULL,
+                track_number INTEGER, disc_number INTEGER, duration REAL NOT NULL,
+                codec TEXT NOT NULL, bitrate INTEGER, sample_rate REAL, artwork BLOB,
+                lyrics TEXT, mb_recording_id TEXT, mb_release_id TEXT, acoustid TEXT,
+                added_at REAL NOT NULL, modified_at REAL NOT NULL, file_size INTEGER NOT NULL
+            );
+            CREATE TABLE playlists (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at REAL NOT NULL);
+            CREATE TABLE playlist_tracks (
+                playlist_id TEXT NOT NULL, track_id TEXT NOT NULL, position INTEGER NOT NULL,
+                PRIMARY KEY (playlist_id, track_id)
+            );
+            CREATE TABLE play_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, track_id TEXT NOT NULL, played_at REAL NOT NULL
+            );
+            CREATE VIRTUAL TABLE tracks_fts USING fts5(
+                track_id UNINDEXED, title, artist, album, album_artist, genre
+            );
+            INSERT INTO tracks VALUES (
+                'legacy-id', '\(trackPath)', 'legacy-song.mp3', 'Legacy Song', 'Legacy Artist',
+                'Legacy Artist', 'Legacy Album', '', '', 1, 1, 120, 'MP3', NULL, NULL,
+                NULL, NULL, NULL, NULL, NULL, 1, 1, 1
+            );
+            """)
+
+        let database = LibraryDatabase(databaseURL: databaseURL)
+        let health = try await database.health()
+        let tracks = try await database.fetchTracks(search: "legacy")
+
+        XCTAssertEqual(health.schemaVersion, LibraryDatabase.currentSchemaVersion)
+        XCTAssertTrue(health.foreignKeysEnabled)
+        XCTAssertEqual(tracks.map(\.id), ["legacy-id"])
+        try await database.toggleFavorite(trackID: "legacy-id")
+        let favorites = try await database.fetchTracks(favoritesOnly: true)
+        XCTAssertEqual(favorites.map(\.id), ["legacy-id"])
+    }
+
+    func testArtistProfilesAndFailedLookupAttemptsPersist() async throws {
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let profile = ArtistProfile(summary: "A cached artist biography.", source: .lastFM)
+
+        try await database.updateArtistProfile(artist: "Cached Artist", profile: profile)
+        try await database.recordArtistProfileAttempt(artist: "Missing Artist")
+
+        let profiles = try await database.fetchArtistProfiles()
+        let recentAttempts = try await database.recentlyAttemptedArtistProfiles(
+            since: Date(timeIntervalSinceNow: -60)
+        )
+        let futureAttempts = try await database.recentlyAttemptedArtistProfiles(
+            since: Date(timeIntervalSinceNow: 60)
+        )
+
+        XCTAssertEqual(profiles["Cached Artist"], profile)
+        XCTAssertEqual(recentAttempts, ["Missing Artist"])
+        XCTAssertTrue(futureAttempts.isEmpty)
+    }
+
+    func testAlbumArtworkAttemptsPersistRecentMisses() async throws {
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let albumKey = "boards of canada\u{1F}remixes"
+
+        let attemptsBefore = try await database.recentlyAttemptedAlbumArtwork(
+            since: Date(timeIntervalSinceNow: -60)
+        )
+        XCTAssertTrue(attemptsBefore.isEmpty)
+
+        try await database.recordAlbumArtworkAttempt(key: albumKey)
+
+        let recentAttempts = try await database.recentlyAttemptedAlbumArtwork(
+            since: Date(timeIntervalSinceNow: -60)
+        )
+        XCTAssertEqual(recentAttempts, [albumKey])
+
+        let futureAttempts = try await database.recentlyAttemptedAlbumArtwork(
+            since: Date(timeIntervalSinceNow: 60)
+        )
+        XCTAssertTrue(futureAttempts.isEmpty)
+    }
+
     func testUpsertAndSearchByArtist() async throws {
         let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
         let metadata = TrackMetadata(
@@ -41,6 +146,50 @@ final class LibraryDatabaseTests: XCTestCase {
         let mostPlayed = try await database.fetchTracks(mostPlayedSince: Date(timeIntervalSinceNow: -60))
         XCTAssertEqual(mostPlayed.first?.id, trackID)
         XCTAssertEqual(mostPlayed.first?.playCount, 2)
+
+        let searchedMostPlayed = try await database.fetchTracks(
+            search: "Test Artist",
+            mostPlayedSince: Date(timeIntervalSinceNow: -60)
+        )
+        XCTAssertEqual(searchedMostPlayed.map(\.id), [trackID])
+
+        let recentArtists = try await database.fetchRecentlyPlayedArtists(
+            since: Date(timeIntervalSinceNow: -60)
+        )
+        XCTAssertEqual(recentArtists.map(\.name), ["Test Artist"])
+        XCTAssertEqual(recentArtists.first?.playCount, 2)
+    }
+
+    func testBatchUpsertAndForeignKeyCascade() async throws {
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let first = makeMetadata(path: "/tmp/uziq-batch/missing-one.mp3", title: "One")
+        let second = makeMetadata(path: "/tmp/uziq-batch/missing-two.mp3", title: "Two")
+
+        try await database.upsertBatch([first, second])
+        let tracks = try await database.fetchTracks()
+        XCTAssertEqual(Set(tracks.map(\.displayTitle)), ["One", "Two"])
+
+        let playlist = try await database.createPlaylist(name: "Cascade")
+        let firstTrack = try XCTUnwrap(tracks.first)
+        try await database.addTrack(trackID: firstTrack.id, toPlaylist: playlist.id)
+        try await database.removeMissingFiles()
+        let remainingPlaylistTracks = try await database.fetchPlaylistTracks(playlistID: playlist.id)
+
+        XCTAssertTrue(remainingPlaylistTracks.isEmpty)
+    }
+
+    func testExternalTrackPlayIsIgnoredByLocalHistory() async throws {
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let metadata = makeMetadata(path: "/tmp/uziq-local-counterpart.mp3", title: "Shared Song")
+        try await database.upsert(metadata)
+
+        let recorded = try await database.recordPlay(trackID: "bandcamp-123-shared-song")
+        let mostPlayed = try await database.fetchTracks(
+            mostPlayedSince: Date(timeIntervalSinceNow: -60)
+        )
+
+        XCTAssertFalse(recorded)
+        XCTAssertTrue(mostPlayed.isEmpty)
     }
 
     func testFLACVorbisCommentsAreRead() async throws {
@@ -152,6 +301,20 @@ final class LibraryDatabaseTests: XCTestCase {
         XCTAssertEqual(albums.first?.artworkData, artwork)
     }
 
+    func testLocalBrowseSnapshotBuildsAlbumsArtistsAndGenresTogether() {
+        let tracks = [
+            makeTrack(id: "microcastle", album: "Microcastle", artwork: nil),
+            makeTrack(id: "weird-era", album: "Microcastle / Weird Era Continued", artwork: nil)
+        ]
+
+        let snapshot = LocalLibraryBrowseSnapshot.grouped(tracks)
+
+        XCTAssertEqual(snapshot.albums.count, 1)
+        XCTAssertEqual(snapshot.artistCount, 1)
+        XCTAssertEqual(snapshot.artistSections.map(\.letter), ["D"])
+        XCTAssertEqual(snapshot.genres.map(\.name), ["Indie"])
+    }
+
     private func makeTrack(id: String, album: String, artwork: Data?) -> Track {
         Track(
             id: id,
@@ -179,6 +342,32 @@ final class LibraryDatabaseTests: XCTestCase {
             isFavorite: false,
             playCount: 0
         )
+    }
+
+    private func makeMetadata(path: String, title: String) -> TrackMetadata {
+        TrackMetadata(
+            url: URL(fileURLWithPath: path), fileName: URL(fileURLWithPath: path).lastPathComponent,
+            title: title, artist: "Batch Artist", albumArtist: "Batch Artist", album: "Batch Album",
+            genre: "", year: "", trackNumber: nil, discNumber: nil, duration: 60,
+            codec: "MP3", bitrate: nil, sampleRate: nil, artworkData: nil, lyrics: nil,
+            musicBrainzRecordingID: nil, musicBrainzReleaseID: nil, acoustID: nil,
+            modifiedAt: .now, fileSize: 1
+        )
+    }
+
+    private func executeSQLite(at url: URL, sql: String) throws {
+        var connection: OpaquePointer?
+        guard sqlite3_open(url.path, &connection) == SQLITE_OK, let connection else {
+            throw UziqError.database("Could not create legacy test database")
+        }
+        defer { sqlite3_close(connection) }
+        var errorPointer: UnsafeMutablePointer<CChar>?
+        let result = sqlite3_exec(connection, sql, nil, nil, &errorPointer)
+        guard result == SQLITE_OK else {
+            let message = errorPointer.map { String(cString: $0) } ?? "SQLite error \(result)"
+            sqlite3_free(errorPointer)
+            throw UziqError.database(message)
+        }
     }
 
     private func littleEndian(_ value: UInt32) -> Data {

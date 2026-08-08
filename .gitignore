@@ -4,4 +4,5 @@ DerivedData/
 xcuserdata/
 .DS_Store
 /librespot
+/Helpers/uziq-librespot/target/
 /dist/

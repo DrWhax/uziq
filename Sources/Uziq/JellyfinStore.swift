@@ -37,9 +37,19 @@ final class JellyfinStore {
     @ObservationIgnored private let cache = JellyfinCacheManager()
     @ObservationIgnored private let imageCache = NSCache<NSString, NSData>()
     @ObservationIgnored private var imageTasks: [String: Task<Data?, Never>] = [:]
+    @ObservationIgnored private var imageTaskGenerations: [String: UUID] = [:]
+    @ObservationIgnored private var connectTask: Task<Void, Never>?
+    @ObservationIgnored private var searchTask: Task<Void, Never>?
+    @ObservationIgnored private var playbackTask: Task<Void, Never>?
+    @ObservationIgnored private var prefetchTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var prefetchTaskGenerations: [String: UUID] = [:]
     @ObservationIgnored private var playbackGeneration = UUID()
-    @ObservationIgnored private var prefetchingItemIDs: Set<String> = []
     @ObservationIgnored private var isLibraryLoadInProgress = false
+    @ObservationIgnored private var libraryLoadGeneration: UUID?
+    @ObservationIgnored private var connectionGeneration = UUID()
+    @ObservationIgnored private var connectGeneration = UUID()
+    @ObservationIgnored private var searchGeneration = UUID()
+    @ObservationIgnored private var loadingOperations: Set<UUID> = []
     @ObservationIgnored private var musicLibraryID: String?
 
     init() {
@@ -59,9 +69,23 @@ final class JellyfinStore {
         }
     }
 
+    deinit {
+        connectTask?.cancel()
+        searchTask?.cancel()
+        playbackTask?.cancel()
+        for task in prefetchTasks.values { task.cancel() }
+        for task in imageTasks.values { task.cancel() }
+    }
+
     var isConnected: Bool { session != nil && client?.accessToken != nil }
     var serverName: String? { session?.serverName }
     var profileName: String? { session?.username }
+    var isUsingInsecureHTTP: Bool { Self.isPlainHTTPAddress(serverAddress) }
+
+    nonisolated static func isPlainHTTPAddress(_ value: String) -> Bool {
+        URLComponents(string: value.trimmingCharacters(in: .whitespacesAndNewlines))?
+            .scheme?.lowercased() == "http"
+    }
 
     func clearError() { error = nil }
 
@@ -76,6 +100,7 @@ final class JellyfinStore {
     func toggleFavorite(_ item: JellyfinCatalogItem) {
         guard item.kind == .track, let client, let session,
               !favoriteMutationIDs.contains(item.id) else { return }
+        let generation = connectionGeneration
         let wasFavorite = isFavorite(item)
         let shouldFavorite = !wasFavorite
         favoriteMutationIDs.insert(item.id)
@@ -93,8 +118,10 @@ final class JellyfinStore {
                         Paths.unmarkFavoriteItem(itemID: item.id, userID: session.userID)
                     ).value
                 }
+                guard connectionGeneration == generation else { return }
                 setFavorite(item, isFavorite: userData.isFavorite ?? shouldFavorite)
             } catch {
+                guard connectionGeneration == generation else { return }
                 setFavorite(item, isFavorite: wasFavorite)
                 self.error = "Jellyfin could not update this favorite: \(error.localizedDescription)"
             }
@@ -116,8 +143,17 @@ final class JellyfinStore {
 
         isConnecting = true
         error = nil
-        Task {
-            defer { isConnecting = false }
+        let generation = UUID()
+        connectGeneration = generation
+        connectTask?.cancel()
+        connectTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if connectGeneration == generation {
+                    isConnecting = false
+                    connectTask = nil
+                }
+            }
             do {
                 let newClient = makeClient(url: url, token: nil)
                 async let publicInfo = newClient.send(Paths.getPublicSystemInfo).value
@@ -134,13 +170,19 @@ final class JellyfinStore {
                     username: authentication.user?.name ?? username,
                     serverName: info?.serverName ?? "Jellyfin"
                 )
+                try Task.checkCancellation()
+                guard connectGeneration == generation else { return }
                 try JellyfinKeychain.write(newSession)
+                invalidateConnectionWork()
                 self.session = newSession
                 self.client = newClient
                 self.serverAddress = url.absoluteString
                 self.username = newSession.username
                 await loadLibrary()
+            } catch is CancellationError {
+                return
             } catch {
+                guard connectGeneration == generation else { return }
                 self.error = "Could not connect to Jellyfin: \(error.localizedDescription)"
             }
         }
@@ -148,6 +190,11 @@ final class JellyfinStore {
 
     func disconnect() {
         let oldClient = client
+        connectGeneration = UUID()
+        connectTask?.cancel()
+        connectTask = nil
+        isConnecting = false
+        invalidateConnectionWork()
         session = nil
         client = nil
         musicLibraryID = nil
@@ -156,6 +203,7 @@ final class JellyfinStore {
         artists = []
         playlists = []
         favoriteTracks = []
+        favoriteMutationIDs = []
         clearSearch()
         JellyfinKeychain.remove()
         Task { try? await oldClient?.signOut() }
@@ -163,41 +211,57 @@ final class JellyfinStore {
 
     func loadLibrary(showProgress: Bool = true) async {
         guard let client, let session, !isLibraryLoadInProgress else { return }
+        let connectionID = self.connectionGeneration
+        let loadGeneration = UUID()
+        libraryLoadGeneration = loadGeneration
         isLibraryLoadInProgress = true
-        if showProgress {
-            isLoading = true
-            error = nil
-        }
+        if showProgress { beginLoading(loadGeneration); error = nil }
         defer {
-            isLibraryLoadInProgress = false
-            if showProgress { isLoading = false }
+            if libraryLoadGeneration == loadGeneration {
+                libraryLoadGeneration = nil
+                isLibraryLoadInProgress = false
+            }
+            if showProgress { endLoading(loadGeneration) }
         }
         do {
             let views = try await client.send(Paths.getUserViews(parameters: .init(userID: session.userID))).value.items ?? []
             let musicView = views.first { $0.collectionType == .music }
-            musicLibraryID = musicView?.id
-            libraries = views.compactMap(JellyfinCatalogItem.init(dto:))
+            let loadedLibraries = views.compactMap(JellyfinCatalogItem.init(dto:))
 
             async let loadedAlbums = items(
                 kinds: [.musicAlbum], parentID: musicView?.id, limit: 10_000,
-                sortBy: [.sortName], sortOrder: [.ascending]
+                sortBy: [.sortName], sortOrder: [.ascending],
+                using: client, session: session
             )
             async let loadedArtists = items(
                 kinds: [.musicArtist], parentID: musicView?.id, limit: 10_000,
-                sortBy: [.sortName], sortOrder: [.ascending]
+                sortBy: [.sortName], sortOrder: [.ascending],
+                using: client, session: session
             )
             async let loadedPlaylists = items(
                 kinds: [.playlist], parentID: nil, limit: 1_000,
-                sortBy: [.sortName], sortOrder: [.ascending]
+                sortBy: [.sortName], sortOrder: [.ascending],
+                using: client, session: session
             )
             async let loadedFavorites = items(
                 kinds: [.audio], parentID: musicView?.id, limit: 10_000,
-                sortBy: [.sortName], sortOrder: [.ascending], isFavorite: true
+                sortBy: [.sortName], sortOrder: [.ascending], isFavorite: true,
+                using: client, session: session
             )
-            (albums, artists, playlists, favoriteTracks) = try await (
+            let loaded = try await (
                 loadedAlbums, loadedArtists, loadedPlaylists, loadedFavorites
             )
+            try Task.checkCancellation()
+            guard self.connectionGeneration == connectionID,
+                  libraryLoadGeneration == loadGeneration else { return }
+            musicLibraryID = musicView?.id
+            libraries = loadedLibraries
+            (albums, artists, playlists, favoriteTracks) = loaded
+        } catch is CancellationError {
+            return
         } catch {
+            guard self.connectionGeneration == connectionID,
+                  libraryLoadGeneration == loadGeneration else { return }
             if showProgress { handleAPIError(error) }
         }
     }
@@ -207,17 +271,26 @@ final class JellyfinStore {
     func search(query: String) {
         let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
         self.query = normalized
-        guard isConnected else {
+        guard let client, let session else {
             error = "Connect to Jellyfin before searching."
             return
         }
+        cancelSearch()
         guard !normalized.isEmpty else {
             clearSearch()
             return
         }
-        isLoading = true
+        let generation = UUID()
+        let connectionID = self.connectionGeneration
+        searchGeneration = generation
+        beginLoading(generation)
         error = nil
-        Task {
+        searchTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if searchGeneration == generation { searchTask = nil }
+                endLoading(generation)
+            }
             do {
                 let results = try await items(
                     kinds: [.audio, .musicAlbum, .musicArtist, .playlist],
@@ -225,16 +298,24 @@ final class JellyfinStore {
                     limit: 60,
                     sortBy: [.sortName],
                     sortOrder: [.ascending],
-                    searchTerm: normalized
+                    searchTerm: normalized,
+                    using: client,
+                    session: session
                 )
+                try Task.checkCancellation()
+                guard self.connectionGeneration == connectionID,
+                      searchGeneration == generation else { return }
                 searchTracks = results.filter { $0.kind == .track }
                 searchAlbums = results.filter { $0.kind == .album }
                 searchArtists = results.filter { $0.kind == .artist }
                 searchPlaylists = results.filter { $0.kind == .playlist }
+            } catch is CancellationError {
+                return
             } catch {
+                guard self.connectionGeneration == connectionID,
+                      searchGeneration == generation else { return }
                 handleAPIError(error)
             }
-            isLoading = false
         }
     }
 
@@ -274,11 +355,16 @@ final class JellyfinStore {
 
     func artworkData(for item: JellyfinCatalogItem, maxWidth: Int = 500) async -> Data? {
         guard let imageItemID = item.imageItemID, let client else { return nil }
+        let connectionID = connectionGeneration
         let key = "\(imageItemID)-\(item.imageTag ?? "")-\(maxWidth)"
         let cacheKey = key as NSString
         if let data = imageCache.object(forKey: cacheKey) { return data as Data }
-        if let existing = imageTasks[key] { return await existing.value }
+        if let existing = imageTasks[key] {
+            let data = await existing.value
+            return connectionGeneration == connectionID ? data : nil
+        }
 
+        let generation = UUID()
         let task = Task<Data?, Never> {
             do {
                 let request = Paths.getItemImage(
@@ -286,14 +372,20 @@ final class JellyfinStore {
                     imageType: "Primary",
                     parameters: .init(maxWidth: maxWidth, quality: 88, tag: item.imageTag)
                 )
-                return try await client.data(for: request).value
+                let data = try await client.data(for: request).value
+                try Task.checkCancellation()
+                return data
             } catch {
                 return nil
             }
         }
         imageTasks[key] = task
+        imageTaskGenerations[key] = generation
         let data = await task.value
+        guard connectionGeneration == connectionID,
+              imageTaskGenerations[key] == generation else { return nil }
         imageTasks[key] = nil
+        imageTaskGenerations[key] = nil
         if let data { imageCache.setObject(data as NSData, forKey: cacheKey, cost: data.count) }
         return data
     }
@@ -310,17 +402,25 @@ final class JellyfinStore {
         let generation = UUID()
         playbackGeneration = generation
         isPreparingPlayback = true
-        Task {
+        playbackTask?.cancel()
+        playbackTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if playbackGeneration == generation {
+                    playbackTask = nil
+                    isPreparingPlayback = false
+                }
+            }
             do {
                 let url = try await cachedAudioURL(for: item)
                 guard playbackGeneration == generation else { return }
                 let artwork = await artworkData(for: item)
                 guard playbackGeneration == generation else { return }
                 playback.play(makeTrack(from: item, url: url, artwork: artwork))
-                isPreparingPlayback = false
+            } catch is CancellationError {
+                return
             } catch {
                 guard playbackGeneration == generation else { return }
-                isPreparingPlayback = false
                 onFailure(error.localizedDescription)
             }
         }
@@ -328,17 +428,23 @@ final class JellyfinStore {
 
     func cancelPendingPlayback() {
         playbackGeneration = UUID()
+        playbackTask?.cancel()
+        playbackTask = nil
         isPreparingPlayback = false
     }
 
     func prefetch(_ item: JellyfinCatalogItem) {
         guard item.kind == .track,
-              !prefetchingItemIDs.contains(item.id),
+              prefetchTasks[item.id] == nil,
               !FileManager.default.fileExists(atPath: cache.audioURL(itemID: item.id, container: item.container).path) else { return }
-        prefetchingItemIDs.insert(item.id)
-        Task {
+        let generation = UUID()
+        prefetchTaskGenerations[item.id] = generation
+        prefetchTasks[item.id] = Task { [weak self] in
+            guard let self else { return }
             _ = try? await cachedAudioURL(for: item)
-            prefetchingItemIDs.remove(item.id)
+            guard prefetchTaskGenerations[item.id] == generation else { return }
+            prefetchTasks[item.id] = nil
+            prefetchTaskGenerations[item.id] = nil
         }
     }
 
@@ -378,9 +484,12 @@ final class JellyfinStore {
         isFavorite: Bool? = nil,
         albumIDs: [String]? = nil,
         artistIDs: [String]? = nil,
-        albumArtistIDs: [String]? = nil
+        albumArtistIDs: [String]? = nil,
+        using providedClient: JellyfinClient? = nil,
+        session providedSession: JellyfinSession? = nil
     ) async throws -> [JellyfinCatalogItem] {
-        guard let client, let session else { throw JellyfinStoreError.notConnected }
+        guard let client = providedClient ?? self.client,
+              let session = providedSession ?? self.session else { throw JellyfinStoreError.notConnected }
         var loaded: [JellyfinCatalogItem] = []
         var startIndex = 0
         while loaded.count < limit {
@@ -405,6 +514,7 @@ final class JellyfinStore {
                 enableImages: true
             )
             let response = try await client.send(Paths.getItems(parameters: parameters)).value
+            try Task.checkCancellation()
             let page = response.items ?? []
             loaded.append(contentsOf: page.compactMap(JellyfinCatalogItem.init(dto:)))
             startIndex += page.count
@@ -450,6 +560,7 @@ final class JellyfinStore {
             parameters: .init(container: item.container, isStatic: true)
         )
         let temporaryURL = try await client.download(for: request).value
+        try Task.checkCancellation()
         if FileManager.default.fileExists(atPath: destination.path) {
             try? cache.markUsed(destination)
             return destination
@@ -490,7 +601,7 @@ final class JellyfinStore {
         let deviceKey = "jellyfin-device-id"
         let deviceID = defaults.string(forKey: deviceKey) ?? UUID().uuidString
         defaults.set(deviceID, forKey: deviceKey)
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
         let sessionConfiguration = URLSessionConfiguration.ephemeral
         sessionConfiguration.urlCache = nil
         sessionConfiguration.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -506,6 +617,44 @@ final class JellyfinStore {
         searchAlbums = []
         searchArtists = []
         searchPlaylists = []
+    }
+
+    private func beginLoading(_ id: UUID) {
+        loadingOperations.insert(id)
+        isLoading = true
+    }
+
+    private func endLoading(_ id: UUID) {
+        loadingOperations.remove(id)
+        isLoading = !loadingOperations.isEmpty
+    }
+
+    private func cancelSearch() {
+        let cancelledGeneration = searchGeneration
+        searchGeneration = UUID()
+        searchTask?.cancel()
+        searchTask = nil
+        endLoading(cancelledGeneration)
+    }
+
+    private func invalidateConnectionWork() {
+        connectionGeneration = UUID()
+        cancelSearch()
+        libraryLoadGeneration = nil
+        isLibraryLoadInProgress = false
+        playbackGeneration = UUID()
+        playbackTask?.cancel()
+        playbackTask = nil
+        isPreparingPlayback = false
+        for task in prefetchTasks.values { task.cancel() }
+        prefetchTasks.removeAll()
+        prefetchTaskGenerations.removeAll()
+        for task in imageTasks.values { task.cancel() }
+        imageTasks.removeAll()
+        imageTaskGenerations.removeAll()
+        imageCache.removeAllObjects()
+        loadingOperations.removeAll()
+        isLoading = false
     }
 
     private func setFavorite(_ item: JellyfinCatalogItem, isFavorite: Bool) {

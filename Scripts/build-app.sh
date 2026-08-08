@@ -31,15 +31,22 @@ if [[ -n "$spotify_client_id" ]]; then
 fi
 
 librespot_source=${UZIQ_LIBRESPOT_PATH:-}
-if [[ -z "$librespot_source" && -x "$project_dir/librespot" ]]; then
-    librespot_source="$project_dir/librespot"
-fi
+helper_name=uziq-librespot
 if [[ -z "$librespot_source" ]]; then
-    librespot_source=$(command -v librespot || true)
+    helper_manifest="$project_dir/Helpers/uziq-librespot/Cargo.toml"
+    if ! command -v cargo >/dev/null; then
+        echo "Rust/Cargo is required to build Uziq's bundled Spotify helper." >&2
+        exit 1
+    fi
+    cargo build --release --locked --manifest-path "$helper_manifest"
+    librespot_source="$project_dir/Helpers/uziq-librespot/target/release/uziq-librespot"
+elif [[ "${librespot_source:t}" != "uziq-librespot" ]]; then
+    # Preserve support for a stock librespot override. Uziq detects this name
+    # and falls back to Spotify Web API transport controls.
+    helper_name=librespot
 fi
-if [[ -z "$librespot_source" || ! -x "$librespot_source" ]]; then
-    echo "A librespot executable is required to package Uziq." >&2
-    echo "Install librespot 0.8.0 or set UZIQ_LIBRESPOT_PATH to its executable." >&2
+if [[ ! -x "$librespot_source" ]]; then
+    echo "Spotify playback helper is not executable: $librespot_source" >&2
     exit 1
 fi
 
@@ -52,8 +59,9 @@ for app_arch in ${(z)app_archs}; do
     fi
 done
 
-cp -X "$librespot_source" "$helpers_dir/librespot"
-chmod 755 "$helpers_dir/librespot"
+helper_destination="$helpers_dir/$helper_name"
+cp -X "$librespot_source" "$helper_destination"
+chmod 755 "$helper_destination"
 cp "$project_dir/ThirdPartyNotices/librespot-LICENSE.txt" "$notices_dir/librespot-LICENSE.txt"
 
 icon_source="$project_dir/Images/logo.png"
@@ -67,10 +75,10 @@ iconutil -c icns "$iconset_dir" -o "$contents_dir/Resources/AppIcon.icns"
 rm -rf "$iconset_dir"
 
 plutil -lint "$contents_dir/Info.plist" >/dev/null
-codesign --force --options runtime --timestamp=none --sign - --identifier com.crambledeggs.uziq.librespot "$helpers_dir/librespot"
+codesign --force --options runtime --timestamp=none --sign - --identifier com.crambledeggs.uziq.librespot "$helper_destination"
 codesign --force --options runtime --timestamp=none --sign - "$app_dir"
-codesign --verify --strict --verbose=2 "$helpers_dir/librespot"
+codesign --verify --strict --verbose=2 "$helper_destination"
 codesign --verify --deep --strict --verbose=2 "$app_dir"
-echo "Bundled librespot from $librespot_source ($helper_archs)"
+echo "Bundled $helper_name from $librespot_source ($helper_archs)"
 echo "Bundled signed application resources and third-party notices"
 echo "$app_dir"

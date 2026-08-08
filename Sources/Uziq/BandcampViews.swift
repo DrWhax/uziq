@@ -7,6 +7,7 @@ struct BandcampLibraryView: View {
     @State private var showingSetup = false
     @State private var showingSavedOnly = false
     @State private var selectedOwnedRelease: BandcampResult?
+    @State private var selectedArtist: BandcampResult?
 
     var body: some View {
         @Bindable var bandcamp = bandcamp
@@ -126,7 +127,14 @@ struct BandcampLibraryView: View {
                         ) {
                             queue.replace(with: result)
                         } onOpen: {
-                            NSWorkspace.shared.open(result.openURL)
+                            switch result.type {
+                            case "b":
+                                selectedArtist = result
+                            case "a", "t":
+                                selectedOwnedRelease = result
+                            default:
+                                NSWorkspace.shared.open(result.openURL)
+                            }
                         }
                         Divider()
                     }
@@ -152,6 +160,9 @@ struct BandcampLibraryView: View {
             .navigationDestination(item: $selectedOwnedRelease) { result in
                 BandcampReleaseDetailView(result: result)
             }
+            .navigationDestination(item: $selectedArtist) { artist in
+                BandcampArtistDetailView(artist: artist)
+            }
         }
     }
 
@@ -167,6 +178,7 @@ struct BandcampLibraryView: View {
                 }
             }
         }
+        .mouseDraggableHorizontalScroll()
     }
 
     private var keywordSubscriptions: [BandcampSubscription] {
@@ -241,6 +253,7 @@ struct BandcampLibraryView: View {
                     }
                     .padding(.horizontal, 28)
                 }
+                .mouseDraggableHorizontalScroll()
                 .frame(height: 166)
             }
         }
@@ -305,6 +318,7 @@ struct BandcampLibraryView: View {
                     }
                     .padding(.horizontal, 28)
                 }
+                .mouseDraggableHorizontalScroll()
                 .frame(height: 190)
             }
         }
@@ -484,7 +498,7 @@ struct BandcampArtistDetailView: View {
                             .foregroundStyle(.secondary)
                         Text(artist.title)
                             .font(.system(size: 38, weight: .bold, design: .rounded))
-                        Text("Subscribed in Uziq")
+                        Text("Artist on Bandcamp")
                             .foregroundStyle(.secondary)
                         HStack {
                             Button {
@@ -667,7 +681,7 @@ struct BandcampReleaseDetailView: View {
                     .shadow(color: .black.opacity(0.18), radius: 14, y: 7)
 
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Bandcamp purchase")
+                        Text("Bandcamp release")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.secondary)
                         Text(details?.title ?? result.title)
@@ -888,13 +902,18 @@ struct BandcampResultRow: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(isPlayDisabled)
             }
-            Button("Open", action: onOpen)
+            Button(result.type == "b" ? "View Artist" : "Open", action: onOpen)
                 .buttonStyle(.bordered)
         }
         .padding(.vertical, 10)
         .contextMenu {
             Button(isSaved ? "Remove from Favorites" : "Add to Favorites", action: onToggleSaved)
-            Button("Open in Browser", action: onOpen)
+            if result.type == "b" || result.type == "a" || result.type == "t" {
+                Button(result.type == "b" ? "View Artist in Uziq" : "View Release in Uziq", action: onOpen)
+                Button("Open in Browser") { NSWorkspace.shared.open(result.openURL) }
+            } else {
+                Button("Open in Browser", action: onOpen)
+            }
             if result.isPlayable {
                 Button("Play", action: onPlay)
                 Button("Play Next") { queue.playNext(result) }
@@ -964,6 +983,7 @@ struct BandcampSubscriptionSheet: View {
                         }
                     }
                 }
+                .mouseDraggableHorizontalScroll()
             }
 
             subscriptionEditor(
@@ -1055,5 +1075,6 @@ struct FlowingChips: View {
                 }
             }
         }
+        .mouseDraggableHorizontalScroll()
     }
 }

@@ -15,6 +15,15 @@ enum LibrarySection: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    var usesLocalLibrary: Bool {
+        switch self {
+        case .bandcamp, .spotify, .jellyfin, .settings:
+            false
+        default:
+            true
+        }
+    }
+
     var title: String {
         switch self {
         case .library: "Library"
@@ -223,6 +232,31 @@ struct ArtistGroup: Identifiable, Hashable, Sendable {
     }
 }
 
+struct ArtistLetterSection: Identifiable, Sendable {
+    let letter: String
+    let artists: [ArtistGroup]
+
+    var id: String { letter }
+
+    static func grouped(_ tracks: [Track]) -> [ArtistLetterSection] {
+        grouped(ArtistGroup.grouped(tracks))
+    }
+
+    static func grouped(_ artists: [ArtistGroup]) -> [ArtistLetterSection] {
+        Dictionary(grouping: artists) { artist in
+            guard let first = artist.name.trimmingCharacters(in: .whitespacesAndNewlines).first,
+                  first.isLetter else { return "#" }
+            return String(first).uppercased()
+        }
+        .map { ArtistLetterSection(letter: $0.key, artists: $0.value) }
+        .sorted {
+            if $0.letter == "#" { return false }
+            if $1.letter == "#" { return true }
+            return $0.letter < $1.letter
+        }
+    }
+}
+
 struct GenreGroup: Identifiable, Hashable, Sendable {
     let id: String
     let name: String
@@ -236,6 +270,35 @@ struct GenreGroup: Identifiable, Hashable, Sendable {
             }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
+}
+
+struct LocalLibraryBrowseSnapshot: Sendable {
+    let albums: [AlbumGroup]
+    let artists: [ArtistGroup]
+    let artistSections: [ArtistLetterSection]
+    let genres: [GenreGroup]
+
+    static let empty = LocalLibraryBrowseSnapshot(albums: [], artists: [], artistSections: [], genres: [])
+
+    static func grouped(_ tracks: [Track]) -> LocalLibraryBrowseSnapshot {
+        let artists = ArtistGroup.grouped(tracks)
+        return LocalLibraryBrowseSnapshot(
+            albums: AlbumGroup.grouped(tracks),
+            artists: artists,
+            artistSections: ArtistLetterSection.grouped(artists),
+            genres: GenreGroup.grouped(tracks)
+        )
+    }
+
+    var artistCount: Int { artists.count }
+}
+
+struct RecentArtistPlay: Identifiable, Equatable, Sendable {
+    let name: String
+    let playCount: Int
+    let lastPlayedAt: Date
+
+    var id: String { name.lowercased() }
 }
 
 struct ScanProgress: Sendable {
@@ -271,7 +334,7 @@ struct ArtistArtworkProgress: Sendable {
     }
 }
 
-enum ArtistProfileSource: String, Sendable {
+enum ArtistProfileSource: String, Codable, Sendable {
     case lastFM
     case bandcamp
 
@@ -283,7 +346,7 @@ enum ArtistProfileSource: String, Sendable {
     }
 }
 
-struct ArtistProfile: Hashable, Sendable {
+struct ArtistProfile: Codable, Hashable, Sendable {
     let summary: String
     let source: ArtistProfileSource
 }

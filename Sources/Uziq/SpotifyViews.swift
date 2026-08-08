@@ -45,7 +45,7 @@ struct SpotifyLibraryView: View {
         }
         .task {
             spotify.attachPlaybackEngine(playback)
-            if spotify.isAuthorized && spotify.playlists.isEmpty { spotify.loadAccount() }
+            if spotify.isAuthorized { spotify.loadAccount() }
         }
     }
 
@@ -65,6 +65,14 @@ struct SpotifyLibraryView: View {
                     }
                     .buttonStyle(.bordered)
                 }
+
+                Button { spotify.refreshAccount() } label: {
+                    Label("Refresh Spotify Library", systemImage: "arrow.clockwise")
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.bordered)
+                .help("Refresh Spotify library")
+                .disabled(spotify.isRateLimited || spotify.isLoadingAccount)
 
                 HStack(spacing: 7) {
                     Circle()
@@ -98,6 +106,35 @@ private struct SpotifyBrowseView: View {
         @Bindable var spotify = spotify
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
+                if let rateLimitMessage = spotify.rateLimitMessage {
+                    Label(rateLimitMessage, systemImage: "clock.badge.exclamationmark")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(14)
+                        .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+                }
+
+                if spotify.librespot.supportsDirectControl {
+                    VStack(alignment: .leading, spacing: 9) {
+                        Label("Stream directly through Uziq", systemImage: "link")
+                            .font(.headline)
+                        Text("Paste a Spotify track, album, artist, or playlist link. This bypasses Web API playback controls but still streams the audio live.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 10) {
+                            TextField("https://open.spotify.com/track/…", text: $spotify.directPlaybackInput)
+                                .textFieldStyle(.plain)
+                                .onSubmit { spotify.playDirectInput(using: queue) }
+                            Button("Play") { spotify.playDirectInput(using: queue) }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(spotify.directPlaybackInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                        .padding(10)
+                        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                }
+
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass")
                         .foregroundStyle(.secondary)
@@ -114,6 +151,7 @@ private struct SpotifyBrowseView: View {
                     Button("Search") { spotify.search() }
                         .buttonStyle(.borderedProminent)
                 }
+                .disabled(spotify.isRateLimited)
                 .padding(11)
                 .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
 
@@ -158,7 +196,10 @@ private struct SpotifyBrowseView: View {
                                     )
                                 }
                             }
+                            .padding(.horizontal, 28)
                         }
+                        .mouseDraggableHorizontalScroll()
+                        .padding(.horizontal, -28)
                         .frame(height: 190)
                     }
                 }
@@ -171,14 +212,17 @@ private struct SpotifyBrowseView: View {
                             .font(.callout)
                             .foregroundStyle(.secondary)
                         ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 16) {
+                            LazyHStack(alignment: .top, spacing: 16) {
                                 ForEach(spotify.topArtists) { artist in
                                     SpotifyArtistRadioTile(item: artist) {
                                         spotify.openArtist(artist)
                                     }
                                 }
                             }
+                            .padding(.horizontal, 28)
                         }
+                        .mouseDraggableHorizontalScroll()
+                        .padding(.horizontal, -28)
                     }
                 }
 
@@ -187,7 +231,7 @@ private struct SpotifyBrowseView: View {
                     SpotifyResultSection(title: "Albums", items: spotify.searchAlbums)
                     SpotifyResultSection(title: "Artists", items: spotify.searchArtists)
                     SpotifyResultSection(title: "Playlists", items: spotify.searchPlaylists, opensPlaylists: true)
-                } else if !spotify.query.isEmpty && !spotify.isLoading {
+                } else if !spotify.query.isEmpty && !spotify.isLoading && !spotify.isRateLimited {
                     ContentUnavailableView(
                         "No Spotify results",
                         systemImage: "magnifyingglass",

@@ -45,6 +45,26 @@ final class PlaybackQueueTests: XCTestCase {
         XCTAssertEqual(restored.source, .spotify)
     }
 
+    @MainActor
+    func testDirectSpotifySelectionBecomesTheVisibleQueueItem() throws {
+        let sessionURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("uziq-direct-spotify-test-\(UUID().uuidString).json")
+        let queue = PlaybackQueueStore(sessionURL: sessionURL)
+        let item = try XCTUnwrap(
+            SpotifyStore.directPlaybackItem(
+                from: "https://open.spotify.com/track/0123456789ABCDEFGHIJKL"
+            )
+        )
+
+        queue.replace(with: item)
+
+        XCTAssertEqual(queue.currentItem?.source, .spotify)
+        XCTAssertEqual(queue.currentItem?.sourceID, item.id)
+        XCTAssertEqual(queue.currentItem?.spotifyItem?.uri, item.uri)
+
+        try? FileManager.default.removeItem(at: sessionURL)
+    }
+
     func testSpotifyQueueDetectsEndOfSingleTrackPlaybackRequest() {
         let observedAt = Date(timeIntervalSince1970: 1_000)
         let snapshot = SpotifyPlaybackSnapshot(

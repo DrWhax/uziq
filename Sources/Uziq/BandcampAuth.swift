@@ -35,18 +35,25 @@ enum BandcampKeychain {
         return try? JSONDecoder().decode(BandcampOAuthSession.self, from: data)
     }
 
-    static func writeSession(_ session: BandcampOAuthSession) {
-        guard let data = try? JSONEncoder().encode(session) else { return }
+    static func writeSession(_ session: BandcampOAuthSession) throws {
+        let data = try JSONEncoder().encode(session)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
-        let attributes: [String: Any] = [kSecValueData as String: data]
-        if SecItemUpdate(query as CFDictionary, attributes as CFDictionary) == errSecItemNotFound {
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        ]
+        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
             var item = query
-            item[kSecValueData as String] = data
-            SecItemAdd(item as CFDictionary, nil)
+            item.merge(attributes) { _, new in new }
+            let addStatus = SecItemAdd(item as CFDictionary, nil)
+            guard addStatus == errSecSuccess else { throw KeychainWriteError(status: addStatus) }
+        } else if status != errSecSuccess {
+            throw KeychainWriteError(status: status)
         }
     }
 

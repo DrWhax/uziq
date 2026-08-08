@@ -72,17 +72,24 @@ enum SpotifyKeychain {
         return result as? Data
     }
 
-    static func write(_ data: Data, account: String) {
+    static func write(_ data: Data, account: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
-        let attributes: [String: Any] = [kSecValueData as String: data]
-        if SecItemUpdate(query as CFDictionary, attributes as CFDictionary) == errSecItemNotFound {
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        ]
+        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
             var item = query
-            item[kSecValueData as String] = data
-            SecItemAdd(item as CFDictionary, nil)
+            item.merge(attributes) { _, new in new }
+            let addStatus = SecItemAdd(item as CFDictionary, nil)
+            guard addStatus == errSecSuccess else { throw KeychainWriteError(status: addStatus) }
+        } else if status != errSecSuccess {
+            throw KeychainWriteError(status: status)
         }
     }
 
@@ -124,7 +131,7 @@ final class SpotifyLoopbackServer: @unchecked Sendable {
         }
         listener.newConnectionHandler = { [weak self] connection in
             connection.start(queue: self?.queue ?? .global())
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { data, _, _, error in
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak server = self] data, _, _, error in
                 if let error {
                     onError(error)
                     connection.cancel()
@@ -145,7 +152,7 @@ final class SpotifyLoopbackServer: @unchecked Sendable {
                 connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in
                     connection.cancel()
                 })
-                self?.stop()
+                server?.stop()
                 onCallback(callbackURL)
             }
         }

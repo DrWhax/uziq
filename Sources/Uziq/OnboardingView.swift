@@ -260,7 +260,7 @@ struct OnboardingView: View {
                 }
             }
             if spotify.librespot.resolvedExecutableURL == nil {
-                Label("This development build could not find librespot. Packaged Uziq apps include it automatically.", systemImage: "info.circle")
+                Label("This development build could not find the Spotify playback helper. Build Helpers/uziq-librespot once with Cargo; packaged Uziq apps include it automatically.", systemImage: "info.circle")
                     .font(.caption).foregroundStyle(.orange)
             }
         }
@@ -279,6 +279,14 @@ struct OnboardingView: View {
             } else {
                 TextField("Server URL, such as http://jellyfin.local:8096", text: $jellyfin.serverAddress)
                     .textFieldStyle(.roundedBorder)
+                if jellyfin.isUsingInsecureHTTP {
+                    Label(
+                        "Plain HTTP does not encrypt your Jellyfin credentials or music traffic. Continue only on a network you trust.",
+                        systemImage: "exclamationmark.shield.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                }
                 TextField("Username", text: $jellyfin.username).textFieldStyle(.roundedBorder)
                 SecureField("Password", text: $jellyfinPassword).textFieldStyle(.roundedBorder)
                 HStack {

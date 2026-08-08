@@ -3,6 +3,11 @@ import XCTest
 @testable import Uziq
 
 final class JellyfinTests: XCTestCase {
+    func testPlainHTTPServerAddressesAreFlaggedWithoutBeingRejected() {
+        XCTAssertTrue(JellyfinStore.isPlainHTTPAddress("http://192.168.1.10:8096/"))
+        XCTAssertFalse(JellyfinStore.isPlainHTTPAddress("https://music.example.com"))
+    }
+
     func testAudioMetadataMapsToPlayableCatalogTrack() throws {
         let dto = BaseItemDto(
             album: "A Test Album",

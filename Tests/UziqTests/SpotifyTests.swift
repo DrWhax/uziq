@@ -1,14 +1,96 @@
+import Combine
 import XCTest
 @testable import Uziq
 
 final class SpotifyTests: XCTestCase {
+    @MainActor
+    func testOneShotSubscriptionsReleaseWhenPublishersComplete() {
+        let store = OneShotCancellableStore()
+        let subject = PassthroughSubject<Int, Never>()
+        var received: [Int] = []
+
+        store.sink(subject, receiveCompletion: { _ in }, receiveValue: { received.append($0) })
+        XCTAssertEqual(store.count, 1)
+
+        subject.send(7)
+        subject.send(completion: .finished)
+
+        XCTAssertEqual(received, [7])
+        XCTAssertEqual(store.count, 0)
+
+        store.sink(Just(9), receiveCompletion: { _ in }, receiveValue: { received.append($0) })
+        XCTAssertEqual(received, [7, 9])
+        XCTAssertEqual(store.count, 0, "Synchronous completion must not be inserted after finishing")
+    }
+
     func testArtistCatalogRequestsRespectDevelopmentModeLimits() {
         XCTAssertEqual(SpotifyStore.artistAlbumsPageLimit, 10)
+        XCTAssertEqual(SpotifyStore.artistAlbumsMaximum, 50)
         XCTAssertEqual(SpotifyStore.albumTracksPageLimit, 50)
         XCTAssertEqual(
             SpotifyStore.artistRadioSearchQuery(for: "Artist \"Name\""),
             "artist:\"Artist \\\"Name\\\"\""
         )
+    }
+
+    func testRateLimitDeadlineHonorsRetryAfterAndNeverShortensCooldown() {
+        let now = Date(timeIntervalSince1970: 1_000)
+
+        XCTAssertEqual(
+            SpotifyStore.rateLimitDeadline(now: now, current: nil, retryAfter: 120),
+            now.addingTimeInterval(120)
+        )
+        XCTAssertEqual(
+            SpotifyStore.rateLimitDeadline(
+                now: now,
+                current: now.addingTimeInterval(300),
+                retryAfter: 120
+            ),
+            now.addingTimeInterval(300)
+        )
+        XCTAssertEqual(
+            SpotifyStore.rateLimitDeadline(now: now, current: nil, retryAfter: nil),
+            now.addingTimeInterval(60)
+        )
+    }
+
+    func testSpotifyLibraryCacheRoundTripsOnlyForMatchingClient() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("uziq-spotify-cache-\(UUID().uuidString)", isDirectory: true)
+        let cache = SpotifyLibraryCache(fileURL: directory.appendingPathComponent("library.json"))
+        let savedAt = Date(timeIntervalSince1970: 1_000)
+        let track = SpotifyCatalogItem(
+            id: "track-id",
+            name: "Track",
+            subtitle: "Artist",
+            uri: "spotify:track:track-id",
+            kind: .track,
+            artworkURL: URL(string: "https://example.com/art.jpg"),
+            durationMS: 123_000,
+            itemCount: nil
+        )
+        let snapshot = SpotifyLibrarySnapshot(
+            clientID: "matching-client",
+            savedAt: savedAt,
+            profileName: "Listener",
+            playlists: [],
+            likedSongs: [track],
+            likedSongsTotal: 1,
+            topArtists: []
+        )
+
+        try cache.save(snapshot)
+        let restored = try XCTUnwrap(cache.load(clientID: "matching-client"))
+
+        XCTAssertEqual(restored.profileName, "Listener")
+        XCTAssertEqual(restored.likedSongs, [track])
+        XCTAssertEqual(restored.savedAt, savedAt)
+        XCTAssertNil(cache.load(clientID: "different-client"))
+        XCTAssertTrue(restored.isFresh(at: savedAt.addingTimeInterval(60)))
+        XCTAssertFalse(restored.isFresh(at: savedAt.addingTimeInterval(SpotifyLibrarySnapshot.refreshInterval)))
+
+        cache.remove()
+        try? FileManager.default.removeItem(at: directory)
     }
 
     func testSpotifyPCMIsDeinterleavedIntoStableChannelBuffers() throws {
@@ -60,6 +142,105 @@ final class SpotifyTests: XCTestCase {
 
     func testSpotifySearchScopesAreExplicit() {
         XCTAssertEqual(SearchProvider.allCases.map(\.title), ["My Library", "Bandcamp", "Spotify", "Jellyfin"])
+    }
+
+    func testLibrespotHelperProtocolEncodesPlaybackContextAndDecodesEvents() throws {
+        let command = LibrespotIPCCommand.loadContext(
+            "spotify:playlist:playlist-id",
+            offsetURI: "spotify:track:track-id",
+            positionMS: 12_500
+        )
+        let commandData = try JSONEncoder().encode(command)
+        let commandJSON = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: commandData) as? [String: Any]
+        )
+
+        XCTAssertEqual(commandJSON["command"] as? String, "load_context")
+        XCTAssertEqual(commandJSON["uri"] as? String, "spotify:playlist:playlist-id")
+        XCTAssertEqual(commandJSON["offset_uri"] as? String, "spotify:track:track-id")
+        XCTAssertEqual(commandJSON["position_ms"] as? Int, 12_500)
+
+        let eventData = #"{"event":"track_changed","uri":"spotify:track:track-id","title":"Track","artist":"Artist","album":"Album","artwork_url":"https://i.scdn.co/image/cover","duration_ms":123000}"#.data(using: .utf8)!
+        let event = try JSONDecoder().decode(LibrespotIPCEvent.self, from: eventData)
+
+        XCTAssertEqual(event.event, "track_changed")
+        XCTAssertEqual(event.uri, "spotify:track:track-id")
+        XCTAssertEqual(event.artist, "Artist")
+        XCTAssertEqual(event.durationMS, 123_000)
+        XCTAssertEqual(event.artworkURL?.absoluteString, "https://i.scdn.co/image/cover")
+    }
+
+    func testDirectSpotifyPlaybackInputAcceptsURIsAndWebLinks() throws {
+        let track = try XCTUnwrap(
+            SpotifyStore.directPlaybackItem(from: "spotify:track:0123456789ABCDEFGHIJKL")
+        )
+        XCTAssertEqual(track.kind, .track)
+        XCTAssertEqual(track.uri, "spotify:track:0123456789ABCDEFGHIJKL")
+
+        let playlist = try XCTUnwrap(
+            SpotifyStore.directPlaybackItem(
+                from: "https://open.spotify.com/intl-pt/playlist/ABCDEFGHIJKLMNOPQRSTUV?si=example"
+            )
+        )
+        XCTAssertEqual(playlist.kind, .playlist)
+        XCTAssertEqual(playlist.uri, "spotify:playlist:ABCDEFGHIJKLMNOPQRSTUV")
+
+        XCTAssertNil(SpotifyStore.directPlaybackItem(from: "https://example.com/track/not-spotify"))
+        XCTAssertNil(SpotifyStore.directPlaybackItem(from: "spotify:show:not-supported"))
+    }
+
+    func testHelperControlsSequenceOnlyForHelperManagedContexts() {
+        XCTAssertTrue(SpotifyStore.helperControlsPlaybackSequence(
+            isDirectPlaybackActive: true,
+            isSpotifyPlaybackSuppressed: false,
+            helperAdvancesWithUziqQueue: false
+        ))
+        XCTAssertFalse(SpotifyStore.helperControlsPlaybackSequence(
+            isDirectPlaybackActive: true,
+            isSpotifyPlaybackSuppressed: false,
+            helperAdvancesWithUziqQueue: true
+        ))
+        XCTAssertFalse(SpotifyStore.helperControlsPlaybackSequence(
+            isDirectPlaybackActive: true,
+            isSpotifyPlaybackSuppressed: true,
+            helperAdvancesWithUziqQueue: false
+        ))
+        XCTAssertFalse(SpotifyStore.helperControlsPlaybackSequence(
+            isDirectPlaybackActive: false,
+            isSpotifyPlaybackSuppressed: false,
+            helperAdvancesWithUziqQueue: false
+        ))
+    }
+
+    func testDirectHelperIsPausedWhenAnotherPlaybackSourceTakesOver() {
+        XCTAssertTrue(SpotifyStore.shouldPauseDirectHelper(
+            supportsDirectControl: true,
+            isSpotifyPlaybackSuppressed: false,
+            isDirectPlaybackActive: true,
+            isStartingPlayback: false,
+            hasPendingItem: false
+        ))
+        XCTAssertTrue(SpotifyStore.shouldPauseDirectHelper(
+            supportsDirectControl: true,
+            isSpotifyPlaybackSuppressed: false,
+            isDirectPlaybackActive: false,
+            isStartingPlayback: true,
+            hasPendingItem: true
+        ))
+        XCTAssertFalse(SpotifyStore.shouldPauseDirectHelper(
+            supportsDirectControl: true,
+            isSpotifyPlaybackSuppressed: true,
+            isDirectPlaybackActive: true,
+            isStartingPlayback: false,
+            hasPendingItem: false
+        ))
+        XCTAssertFalse(SpotifyStore.shouldPauseDirectHelper(
+            supportsDirectControl: false,
+            isSpotifyPlaybackSuppressed: false,
+            isDirectPlaybackActive: true,
+            isStartingPlayback: false,
+            hasPendingItem: false
+        ))
     }
 
     func testPKCERefreshKeepsExistingRefreshTokenWhenSpotifyOmitsReplacement() throws {

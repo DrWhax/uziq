@@ -26,15 +26,18 @@ enum JellyfinKeychain {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
-        let attributes: [String: Any] = [kSecValueData as String: data]
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        ]
         let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound {
             var item = query
-            item[kSecValueData as String] = data
+            item.merge(attributes) { _, new in new }
             let addStatus = SecItemAdd(item as CFDictionary, nil)
-            guard addStatus == errSecSuccess else { throw JellyfinKeychainError.status(addStatus) }
+            guard addStatus == errSecSuccess else { throw KeychainWriteError(status: addStatus) }
         } else if status != errSecSuccess {
-            throw JellyfinKeychainError.status(status)
+            throw KeychainWriteError(status: status)
         }
     }
 
@@ -45,15 +48,5 @@ enum JellyfinKeychain {
             kSecAttrAccount as String: account
         ]
         SecItemDelete(query as CFDictionary)
-    }
-}
-
-private enum JellyfinKeychainError: LocalizedError {
-    case status(OSStatus)
-
-    var errorDescription: String? {
-        switch self {
-        case .status(let status): "Keychain error \(status)"
-        }
     }
 }

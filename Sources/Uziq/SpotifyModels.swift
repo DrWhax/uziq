@@ -113,3 +113,77 @@ enum LibrespotPlayerEvent: String, Equatable, Sendable {
     case seeked
     case stopped
 }
+
+struct LibrespotIPCEvent: Decodable, Equatable, Sendable {
+    let event: String
+    let state: String?
+    let username: String?
+    let uri: String?
+    let title: String?
+    let artist: String?
+    let album: String?
+    let artworkURL: URL?
+    let durationMS: UInt32?
+    let positionMS: UInt32?
+    let message: String?
+
+    enum CodingKeys: String, CodingKey {
+        case event, state, username, uri, title, artist, album, message
+        case artworkURL = "artwork_url"
+        case durationMS = "duration_ms"
+        case positionMS = "position_ms"
+    }
+}
+
+struct LibrespotIPCCommand: Encodable, Equatable, Sendable {
+    let command: String
+    var uri: String? = nil
+    var uris: [String]? = nil
+    var offsetURI: String? = nil
+    var positionMS: UInt32? = nil
+    var volume: Double? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case command, uri, uris, volume
+        case offsetURI = "offset_uri"
+        case positionMS = "position_ms"
+    }
+
+    static func loadContext(
+        _ uri: String,
+        offsetURI: String? = nil,
+        positionMS: UInt32 = 0
+    ) -> Self {
+        Self(
+            command: "load_context",
+            uri: uri,
+            offsetURI: offsetURI,
+            positionMS: positionMS
+        )
+    }
+
+    static func loadTracks(
+        _ uris: [String],
+        offsetURI: String? = nil,
+        positionMS: UInt32 = 0
+    ) -> Self {
+        Self(
+            command: "load_tracks",
+            uris: uris,
+            offsetURI: offsetURI,
+            positionMS: positionMS
+        )
+    }
+
+    static func transport(_ command: String) -> Self {
+        Self(command: command)
+    }
+
+    static func seek(positionMS: UInt32) -> Self {
+        Self(command: "seek", positionMS: positionMS)
+    }
+
+    static func setVolume(_ volume: Double) -> Self {
+        Self(command: "set_volume", volume: volume)
+    }
+}

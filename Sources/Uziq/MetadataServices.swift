@@ -84,8 +84,7 @@ struct MusicBrainzClient: Sendable {
         ]
         guard let url = components?.url else { return [] }
 
-        // MusicBrainz asks clients to stay at or below one request per second.
-        try await Task.sleep(nanoseconds: 1_000_000_000)
+        try await ProviderRequestLimiters.musicBrainz.waitForTurn()
         var request = URLRequest(url: url)
         request.setValue("Uziq/1.0 (macOS music player; local metadata enrichment)", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await session.data(for: request)
@@ -109,8 +108,7 @@ struct MusicBrainzClient: Sendable {
         ]
         guard let url = components?.url else { return nil }
 
-        // MusicBrainz asks clients to stay at or below one request per second.
-        try await Task.sleep(nanoseconds: 1_000_000_000)
+        try await ProviderRequestLimiters.musicBrainz.waitForTurn()
         var request = URLRequest(url: url)
         request.setValue("Uziq/1.0 (macOS music player; local metadata enrichment)", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await session.data(for: request)
@@ -121,8 +119,7 @@ struct MusicBrainzClient: Sendable {
 
     func recording(id: String) async throws -> MusicBrainzRecording? {
         guard let url = URL(string: "https://musicbrainz.org/ws/2/recording/\(id)?fmt=json&inc=artists+releases") else { return nil }
-        // MusicBrainz asks clients to stay at or below one request per second.
-        try await Task.sleep(nanoseconds: 1_000_000_000)
+        try await ProviderRequestLimiters.musicBrainz.waitForTurn()
         var request = URLRequest(url: url)
         request.setValue("Uziq/1.0 (macOS music player; local metadata enrichment)", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await session.data(for: request)
@@ -217,6 +214,7 @@ struct AcoustIDClient: Sendable {
         guard let url = components?.url else { throw UziqError.metadata("Invalid AcoustID request.") }
         var request = URLRequest(url: url)
         request.setValue("Uziq/1.0 (macOS music player)", forHTTPHeaderField: "User-Agent")
+        try await ProviderRequestLimiters.acoustID.waitForTurn()
         let (data, response) = try await URLSession.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw UziqError.metadata("AcoustID returned an HTTP error.")
@@ -271,6 +269,7 @@ struct CoverArtArchiveClient: Sendable {
     }
 
     private func artwork(from url: URL) async throws -> Data? {
+        try await ProviderRequestLimiters.coverArtArchive.waitForTurn()
         var request = URLRequest(url: url)
         request.setValue("Uziq/1.0 (macOS music player)", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await session.data(for: request)
@@ -305,6 +304,7 @@ struct LastFMClient: Sendable {
         ]
         guard let url = components?.url else { return nil }
         do {
+            try await ProviderRequestLimiters.lastFM.waitForTurn()
             var request = URLRequest(url: url)
             request.setValue("Uziq/1.0 (macOS music player; artist artwork)", forHTTPHeaderField: "User-Agent")
             let (data, response) = try await session.data(for: request)
@@ -350,6 +350,7 @@ struct LastFMClient: Sendable {
         guard let url = components?.url else { return nil }
 
         do {
+            try await ProviderRequestLimiters.lastFM.waitForTurn()
             var request = URLRequest(url: url)
             request.setValue("Uziq/1.0 (macOS music player; artist artwork)", forHTTPHeaderField: "User-Agent")
             let (data, response) = try await session.data(for: request)

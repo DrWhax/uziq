@@ -53,7 +53,7 @@ Uziq also publishes the current title, artist, album, artwork, duration, and pla
 - macOS Now Playing and Control Center metadata, seeking, and transport controls
 - Privacy-conscious diagnostics report export with a small rotating event log
 - Bandcamp search, subscriptions, streaming, favorites, and expiring audio cache
-- Spotify PKCE login, personal library, catalog search, and playback through librespot's native CoreAudio output
+- Spotify PKCE login, personal library, catalog search, and playback through Uziq's locally controlled librespot helper
 - Jellyfin account login, music-library browsing, artwork, playlists, search, queued playback, and expiring audio cache
 - Local / Bandcamp / Spotify / Jellyfin global-search scopes
 - Light/dark system appearance support
@@ -65,10 +65,10 @@ Spotify playback requires a Premium account and two one-time browser logins:
 1. Create an app in the Spotify Developer Dashboard.
 2. Add `http://127.0.0.1:8989/callback` to its Redirect URIs.
 3. Enter the app's Client ID under Uziq Settings → Spotify and connect the account. Uziq uses PKCE and does not need the client secret.
-4. When developing with `swift run`, install the playback helper with `cargo install librespot --version 0.8.0 --locked`. Packaged Uziq apps include it automatically.
-5. Start the Spotify playback engine from Settings or the Spotify section. librespot opens its own login the first time and stores the reusable credential under Uziq's Application Support directory.
+4. For `swift run`, build the helper once with `cargo build --manifest-path Helpers/uziq-librespot/Cargo.toml`. Packaged Uziq apps build and include it automatically.
+5. Start the Spotify playback engine from Settings or the Spotify section. The helper opens its own login the first time and stores the reusable credential under Uziq's Application Support directory.
 
-librespot is an unofficial, reverse-engineered Spotify client. Spotify may change its protocol, and its maintainers warn that its use may be forbidden by Spotify. Uziq disables librespot's audio cache and only retains its authentication credential. SpotifyAPI is pinned to a reviewed revision for reproducible builds.
+librespot is an unofficial, reverse-engineered Spotify client. Spotify may change its protocol, and its maintainers warn that its use may be forbidden by Spotify. Uziq's helper uses librespot 0.8.0 and a private stdin/stdout protocol for playback commands and events. This lets known Spotify URIs keep playing during Web API rate limits; catalog search and library refreshes still use Spotify's Web API. Uziq disables librespot's audio cache and only retains its authentication credential. SpotifyAPI is pinned to a reviewed revision for reproducible builds.
 
 ## Jellyfin setup
 
@@ -80,9 +80,9 @@ The password is used only for sign-in and is never stored. The access token is s
 
 ## Packaging
 
-Run `Scripts/build-app.sh release` to create `dist/Uziq.app`. The script bundles librespot, its MIT license, the app icon, and runtime resources; verifies that their architecture matches Uziq; and ad-hoc signs the complete app and helper with hardened runtime enabled. It prefers the repository's ignored `./librespot` binary, then an installed binary on `PATH`. Set `UZIQ_LIBRESPOT_PATH=/path/to/librespot` to package a specific build.
+Run `Scripts/build-app.sh release` to create `dist/Uziq.app`. The script builds and bundles `uziq-librespot`, its MIT license, the app icon, and runtime resources; verifies that the helper architecture matches Uziq; and ad-hoc signs the complete app and helper with hardened runtime enabled. Set `UZIQ_LIBRESPOT_PATH=/path/to/helper` only when testing a specific helper build.
 
-Run `Scripts/package-release.sh release` to additionally create a compressed DMG, ZIP fallback, and checksum file. The DMG includes an Applications shortcut and first-launch instructions. The artifact filename records the Uziq version and supported architecture, such as `Uziq-0.2.0-macOS-arm64.dmg`.
+Run `Scripts/package-release.sh release` to additionally create a compressed DMG, ZIP fallback, and checksum file. The DMG includes an Applications shortcut and first-launch instructions. The artifact filename records the Uziq version and supported architecture, such as `Uziq-1.0.0-macOS-arm64.dmg`.
 
 For a family build that requires no Spotify developer configuration on the destination Mac, package the non-secret Client ID into the app:
 

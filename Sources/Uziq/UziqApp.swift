@@ -178,7 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Darwin.signal(signalNumber, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
             source.setEventHandler {
-                NSApp.terminate(nil)
+                Task { @MainActor in NSApp.terminate(nil) }
             }
             source.resume()
             terminationSignalSources.append(source)

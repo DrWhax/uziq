@@ -38,11 +38,6 @@ struct JellyfinLibraryView: View {
         .task {
             guard jellyfin.isConnected else { return }
             await jellyfin.loadLibrary()
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(20))
-                guard !Task.isCancelled, jellyfin.isConnected else { return }
-                await jellyfin.loadLibrary(showProgress: false)
-            }
         }
         .alert("Jellyfin issue", isPresented: Binding(
             get: { jellyfin.error != nil },
@@ -175,7 +170,10 @@ private struct JellyfinCarousel: View {
                             }
                         }
                     }
+                    .padding(.horizontal, 28)
                 }
+                .mouseDraggableHorizontalScroll()
+                .padding(.horizontal, -28)
             }
         }
     }

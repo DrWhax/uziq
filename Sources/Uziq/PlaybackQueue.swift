@@ -368,6 +368,19 @@ final class PlaybackQueueStore {
     }
 
     func next() {
+        if currentItem?.source == .spotify,
+           spotify?.helperControlsPlaybackSequence == true {
+            if repeatMode == .one {
+                seek(to: 0)
+                spotify?.resume()
+            } else {
+                restoredPosition = 0
+                spotify?.next()
+                persistSession()
+                updateNowPlaying(force: true)
+            }
+            return
+        }
         guard !items.isEmpty else { return }
         if repeatMode == .one {
             restoredPosition = 0
@@ -392,6 +405,14 @@ final class PlaybackQueueStore {
     func previous() {
         if currentTime > 3 {
             seek(to: 0)
+            return
+        }
+        if currentItem?.source == .spotify,
+           spotify?.helperControlsPlaybackSequence == true {
+            restoredPosition = 0
+            spotify?.previous()
+            persistSession()
+            updateNowPlaying(force: true)
             return
         }
         guard let currentIndex, currentIndex > 0 else {
@@ -475,6 +496,12 @@ final class PlaybackQueueStore {
         spotifyPlaybackSeen = false
         jellyfinPrefetchedItemID = nil
         DiagnosticsLog.shared.record("playback", "Dispatching \(item.source.title) queue item")
+        if item.source != .spotify {
+            // Pause Spotify before local or externally cached audio begins.
+            // Bandcamp and Jellyfin may prepare asynchronously, so waiting for
+            // PlaybackEngine's start notification can leave two streams alive.
+            spotify?.suppressForNonSpotifyPlayback()
+        }
         switch item.source {
         case .local:
             bandcamp?.cancelPendingPlayback()
@@ -497,7 +524,7 @@ final class PlaybackQueueStore {
             bandcamp?.cancelPendingPlayback()
             jellyfin?.cancelPendingPlayback()
             guard let spotifyItem = item.spotifyItem else { return }
-            guard spotify?.isAuthorized == true else {
+            guard spotify?.isAuthorized == true || spotify?.librespot.supportsDirectControl == true else {
                 error = "Reconnect Spotify before playing \(item.title)."
                 return
             }
@@ -532,7 +559,9 @@ final class PlaybackQueueStore {
     }
 
     private func timerFired() {
-        if currentItem?.source == .spotify, let snapshot = spotify?.playback {
+        if currentItem?.source == .spotify,
+           spotify?.librespot.isDirectPlaybackActive != true,
+           let snapshot = spotify?.playback {
             if snapshot.itemID == currentItem?.sourceID {
                 if spotifyPlaybackSeen,
                    (hasNext || repeatMode == .one),

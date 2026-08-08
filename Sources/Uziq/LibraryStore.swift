@@ -3,6 +3,7 @@ import Observation
 import SwiftUI
 
 private struct ArtworkCandidate: Sendable {
+    let attemptKey: String
     let artist: String
     let album: String
     let releaseID: String?
@@ -23,6 +24,8 @@ final class LibraryStore {
     var isEnrichingArtwork = false
     var artworkProgress: ArtworkProgress?
     var artistArtwork: [String: Data] = [:]
+    private(set) var browseSnapshot = LocalLibraryBrowseSnapshot.empty
+    private(set) var isPreparingBrowseSnapshot = false
     var artistProfiles: [String: ArtistProfile] = [:]
     var artistProfilesLoading: Set<String> = []
     var isEnrichingArtistArtwork = false
@@ -33,6 +36,7 @@ final class LibraryStore {
     var matchingTrackID: String?
     var playlists: [PlaylistSummary] = []
     var favoriteTrackIDs: Set<String> = []
+    private(set) var recentlyPlayedArtists: [RecentArtistPlay] = []
     private(set) var isInitialLoadComplete = false
 
     @ObservationIgnored private let database = LibraryDatabase()
@@ -41,6 +45,9 @@ final class LibraryStore {
     @ObservationIgnored private let matcher = MetadataMatcher(fingerprintProvider: FpcalcFingerprintProvider())
     @ObservationIgnored private var artworkTask: Task<Void, Never>?
     @ObservationIgnored private var artistArtworkTask: Task<Void, Never>?
+    @ObservationIgnored private var browseGroupingTask: Task<Void, Never>?
+    @ObservationIgnored private var browseGroupingGeneration = UUID()
+    @ObservationIgnored private var normalizedArtistArtwork: [String: Data] = [:]
     @ObservationIgnored private var playObserver: NSObjectProtocol?
 
     init() {
@@ -54,8 +61,11 @@ final class LibraryStore {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 do {
-                    try await self.database.recordPlay(trackID: trackID)
-                    await self.refresh()
+                    let recorded = try await self.database.recordPlay(trackID: trackID)
+                    if recorded {
+                        await self.refresh()
+                        await self.loadRecentlyPlayedArtists()
+                    }
                 } catch {
                     self.lastError = error.localizedDescription
                 }
@@ -63,16 +73,22 @@ final class LibraryStore {
         }
         Task {
             await refresh()
-            isInitialLoadComplete = true
+            await loadRecentlyPlayedArtists()
             await loadFavoriteTrackIDs()
             await loadPlaylists()
             await loadArtistArtwork()
+            await loadArtistProfiles()
+            isInitialLoadComplete = true
+            // Let SwiftUI finish installing its List/NSTableView hierarchy before
+            // enrichment starts publishing progress changes beneath the table.
+            try? await Task.sleep(for: .milliseconds(150))
             startArtworkEnrichment()
             startArtistArtworkEnrichment()
         }
     }
 
     deinit {
+        browseGroupingTask?.cancel()
         if let playObserver { NotificationCenter.default.removeObserver(playObserver) }
     }
 
@@ -118,7 +134,7 @@ final class LibraryStore {
                 Task { @MainActor in self?.scanProgress = progress }
             }
             do {
-                for item in discovered { try await database.upsert(item) }
+                try await database.upsertBatch(discovered)
                 try await database.removeMissingFiles()
                 await refresh()
                 scanMessage = "Indexed \(discovered.count) audio files"
@@ -146,7 +162,11 @@ final class LibraryStore {
             // Reuse the current snapshot so embedded artwork buffers stay shared. A fresh
             // database fetch can otherwise duplicate the entire artwork payload in memory.
             let allTracks = tracks
-            let candidates = Self.artworkCandidates(from: allTracks)
+            let retryCutoff = Date.now.addingTimeInterval(-30 * 24 * 60 * 60)
+            let recentAttempts = (try? await database.recentlyAttemptedAlbumArtwork(since: retryCutoff)) ?? []
+            let candidates = Self.artworkCandidates(from: allTracks).filter {
+                $0.existingArtwork != nil || !recentAttempts.contains($0.attemptKey)
+            }
             guard !candidates.isEmpty else {
                 artworkTask = nil
                 return
@@ -180,6 +200,7 @@ final class LibraryStore {
                         releaseID: candidate.releaseID
                     )
                     session.finishTasksAndInvalidate()
+                    try? await database.recordAlbumArtworkAttempt(key: candidate.attemptKey)
                 }
                 if let artwork {
                     try? await database.updateArtwork(trackIDs: candidate.trackIDs, artworkData: artwork)
@@ -250,6 +271,7 @@ final class LibraryStore {
                     if let artwork = await client.artistImage(for: artist) {
                         try? await database.updateArtistArtwork(artist: artist, artworkData: artwork)
                         artistArtwork[artist] = artwork
+                        normalizedArtistArtwork[Self.normalizedArtistName(artist)] = artwork
                     }
                     try? await database.recordArtistArtworkAttempt(artist: artist)
                     artistArtworkProgress = ArtistArtworkProgress(
@@ -272,13 +294,14 @@ final class LibraryStore {
         let grouped = Dictionary(grouping: eligible) { track in
             albumGroupingKey(for: track, knownAlbums: knownAlbumsByArtist[albumGroupingArtist(track)] ?? [])
         }
-        return grouped.values.compactMap { tracks in
+        return grouped.compactMap { attemptKey, tracks in
             let missingTracks = tracks.filter { $0.artworkData == nil }
             guard let first = tracks.first, !missingTracks.isEmpty else { return nil }
             let displayAlbum = tracks
                 .map(\.album)
                 .first { $0.localizedStandardContains(" / ") } ?? first.album
             return ArtworkCandidate(
+                attemptKey: attemptKey,
                 artist: albumGroupingArtist(first),
                 album: displayAlbum,
                 releaseID: tracks.compactMap(\.musicBrainzReleaseID).first,
@@ -295,14 +318,37 @@ final class LibraryStore {
 
     func refresh() async {
         do {
-            tracks = try await database.fetchTracks(
+            let refreshedTracks = try await database.fetchTracks(
                 search: searchText,
                 recentlyAdded: selectedSection == .recentlyAdded,
                 favoritesOnly: false,
                 mostPlayedSince: selectedSection == .mostPlayed ? mostPlayedRange.startDate : nil
             )
+            tracks = refreshedTracks
+            prepareBrowseSnapshot(from: refreshedTracks)
         } catch {
             lastError = error.localizedDescription
+        }
+    }
+
+    private func prepareBrowseSnapshot(from tracks: [Track]) {
+        browseGroupingTask?.cancel()
+        let generation = UUID()
+        browseGroupingGeneration = generation
+        if browseSnapshot.albums.isEmpty && !tracks.isEmpty {
+            isPreparingBrowseSnapshot = true
+        }
+        let snapshot = tracks
+        browseGroupingTask = Task { [weak self] in
+            let grouped = await Task.detached(priority: .userInitiated) {
+                LocalLibraryBrowseSnapshot.grouped(snapshot)
+            }.value
+            guard !Task.isCancelled,
+                  let self,
+                  self.browseGroupingGeneration == generation else { return }
+            self.browseSnapshot = grouped
+            self.isPreparingBrowseSnapshot = false
+            self.browseGroupingTask = nil
         }
     }
 
@@ -311,6 +357,35 @@ final class LibraryStore {
             artistArtwork = try await database.fetchArtistArtwork().filter {
                 !LastFMClient.isPlaceholderImage($0.value)
             }
+            normalizedArtistArtwork = Dictionary(
+                artistArtwork.map { (Self.normalizedArtistName($0.key), $0.value) },
+                uniquingKeysWith: { first, _ in first }
+            )
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func loadRecentlyPlayedArtists() async {
+        do {
+            recentlyPlayedArtists = try await database.fetchRecentlyPlayedArtists(
+                since: Date.now.addingTimeInterval(-7 * 24 * 60 * 60)
+            )
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func artistGroup(named name: String) -> ArtistGroup? {
+        let normalized = Self.normalizedArtistName(name)
+        return browseSnapshot.artists.first {
+            Self.normalizedArtistName($0.name) == normalized
+        }
+    }
+
+    func loadArtistProfiles() async {
+        do {
+            artistProfiles = try await database.fetchArtistProfiles()
         } catch {
             lastError = error.localizedDescription
         }
@@ -323,10 +398,11 @@ final class LibraryStore {
 
     func artistArtworkData(for artist: String) -> Data? {
         if let artwork = artistArtwork[artist] { return artwork }
-        let normalized = artist.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return artistArtwork.first {
-            $0.key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalized
-        }?.value
+        return normalizedArtistArtwork[Self.normalizedArtistName(artist)]
+    }
+
+    private nonisolated static func normalizedArtistName(_ artist: String) -> String {
+        artist.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     func fetchArtistArtwork() {
@@ -355,6 +431,15 @@ final class LibraryStore {
         artistProfilesLoading.insert(normalizedArtist)
         let lastFMAPIKey = self.lastFMAPIKey
         Task { [weak self] in
+            guard let self else { return }
+            let retryCutoff = Date.now.addingTimeInterval(-30 * 24 * 60 * 60)
+            let recentAttempts = (try? await database.recentlyAttemptedArtistProfiles(
+                since: retryCutoff
+            )) ?? []
+            guard !recentAttempts.contains(normalizedArtist) else {
+                artistProfilesLoading.remove(normalizedArtist)
+                return
+            }
             let lastFMProfile = await LastFMClient(apiKey: lastFMAPIKey).artistBiography(for: normalizedArtist)
             let profile: ArtistProfile?
             if let lastFMProfile {
@@ -365,11 +450,12 @@ final class LibraryStore {
                 profile = nil
             }
 
-            guard let self else { return }
             if let profile {
-                self.artistProfiles[normalizedArtist] = profile
+                artistProfiles[normalizedArtist] = profile
+                try? await database.updateArtistProfile(artist: normalizedArtist, profile: profile)
             }
-            self.artistProfilesLoading.remove(normalizedArtist)
+            try? await database.recordArtistProfileAttempt(artist: normalizedArtist)
+            artistProfilesLoading.remove(normalizedArtist)
         }
     }
 

@@ -44,7 +44,10 @@ final class BandcampStore {
     @ObservationIgnored private var cacheMaintenanceTimer: Timer?
     @ObservationIgnored private var playbackTask: Task<Void, Never>?
     @ObservationIgnored private var collectionTask: Task<Void, Never>?
+    @ObservationIgnored private var searchTask: Task<Void, Never>?
+    @ObservationIgnored private var feedTask: Task<Void, Never>?
     @ObservationIgnored private var playbackGeneration = UUID()
+    @ObservationIgnored private var discoveryGeneration = UUID()
 
     init() {
         accountEmail = UserDefaults.standard.string(forKey: "bandcamp-account-email") ?? ""
@@ -85,6 +88,10 @@ final class BandcampStore {
     deinit {
         if let playObserver { NotificationCenter.default.removeObserver(playObserver) }
         cacheMaintenanceTimer?.invalidate()
+        playbackTask?.cancel()
+        collectionTask?.cancel()
+        searchTask?.cancel()
+        feedTask?.cancel()
     }
 
     func saveSubscriptions(keywords: [String], artists: [String]) {
@@ -136,7 +143,7 @@ final class BandcampStore {
                 )
                 guard let self else { return }
                 authSession = session
-                BandcampKeychain.writeSession(session)
+                try BandcampKeychain.writeSession(session)
                 isAuthenticated = true
                 authRequiresRetry = false
                 authStatusMessage = "Connected as \(email)"
@@ -249,23 +256,37 @@ final class BandcampStore {
             refreshFeed()
             return
         }
+        cancelDiscoveryRequests()
+        let generation = UUID()
+        discoveryGeneration = generation
         let client = self.client
         isLoading = true
         loadingMessage = "Searching Bandcamp…"
         error = nil
-        Task { [weak self] in
+        searchTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if discoveryGeneration == generation {
+                    isLoading = false
+                    searchTask = nil
+                }
+            }
             do {
                 let found = try await client.search(query: trimmed)
-                guard let self, !Task.isCancelled else { return }
+                try Task.checkCancellation()
+                guard discoveryGeneration == generation else { return }
                 results = deduplicated(found)
+            } catch is CancellationError {
+                return
             } catch {
-                self?.error = error.localizedDescription
+                guard discoveryGeneration == generation else { return }
+                self.error = error.localizedDescription
             }
-            self?.isLoading = false
         }
     }
 
     func refreshFeed() {
+        cancelDiscoveryRequests()
         let subscriptions = subscriptions
         guard !subscriptions.isEmpty else {
             results = []
@@ -275,18 +296,28 @@ final class BandcampStore {
             return
         }
 
+        let generation = UUID()
+        discoveryGeneration = generation
         let client = self.client
         isLoading = true
         loadingMessage = "Looking through Bandcamp…"
         error = nil
-        Task { [weak self] in
+        feedTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if discoveryGeneration == generation {
+                    isLoading = false
+                    feedTask = nil
+                }
+            }
             var found: [BandcampResult] = []
             var artistCards: [BandcampResult] = []
             var firstError: Error?
             for subscription in subscriptions {
-                guard !Task.isCancelled else { return }
+                do { try Task.checkCancellation() } catch { return }
                 do {
                     let subscriptionResults = try await client.search(query: subscription.value)
+                    try Task.checkCancellation()
                     found += subscriptionResults
                     if subscription.kind == .artist {
                         artistCards.append(Self.artistCard(
@@ -301,13 +332,21 @@ final class BandcampStore {
                     }
                 }
             }
-            guard let self, !Task.isCancelled else { return }
+            guard !Task.isCancelled, discoveryGeneration == generation else { return }
             results = Array(deduplicated(found).prefix(60))
             subscribedArtists = artistCards
             if !artistCards.isEmpty { artistSubscriptionsCheckedAt = .now }
             if found.isEmpty, let firstError { error = firstError.localizedDescription }
-            isLoading = false
         }
+    }
+
+    private func cancelDiscoveryRequests() {
+        discoveryGeneration = UUID()
+        searchTask?.cancel()
+        feedTask?.cancel()
+        searchTask = nil
+        feedTask = nil
+        isLoading = false
     }
 
     func play(
@@ -495,7 +534,7 @@ final class BandcampStore {
         do {
             let refreshed = try await authClient.refresh(session)
             authSession = refreshed
-            BandcampKeychain.writeSession(refreshed)
+            try BandcampKeychain.writeSession(refreshed)
             isAuthenticated = true
             authError = nil
             authStatusMessage = accountEmail.isEmpty ? "Connected" : "Connected as \(accountEmail)"
@@ -509,7 +548,7 @@ final class BandcampStore {
         if session.needsRefresh {
             session = try await authClient.refresh(session)
             authSession = session
-            BandcampKeychain.writeSession(session)
+            try BandcampKeychain.writeSession(session)
         }
         return session.accessToken
     }

@@ -13,9 +13,15 @@ final class LibrespotService {
     }
     private(set) var status: LibrespotStatus = .stopped
     private(set) var recentLog = ""
+    private(set) var isDirectPlaybackActive = false
+    var onEvent: ((LibrespotIPCEvent) -> Void)?
 
     @ObservationIgnored private var process: Process?
+    @ObservationIgnored private var stdinPipe: Pipe?
+    @ObservationIgnored private var stdoutPipe: Pipe?
     @ObservationIgnored private var stderrPipe: Pipe?
+    @ObservationIgnored private var stdoutBuffer = Data()
+    @ObservationIgnored private var pendingCommands: [Data] = []
     @ObservationIgnored private var eraseCredentialsWhenStopped = false
     @ObservationIgnored private var stopRequested = false
     @ObservationIgnored private var appTerminationObserver: NSObjectProtocol?
@@ -69,12 +75,28 @@ final class LibrespotService {
         let fileManager = FileManager.default
         if let bundledExecutableURL { return bundledExecutableURL }
 
+        var candidates: [String] = []
+#if DEBUG
+        let projectRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        candidates += [
+            projectRoot.appendingPathComponent("Helpers/uziq-librespot/target/debug/uziq-librespot").path,
+            projectRoot.appendingPathComponent("Helpers/uziq-librespot/target/release/uziq-librespot").path
+        ]
+        if let helper = candidates.lazy
+            .map({ URL(fileURLWithPath: $0).standardizedFileURL })
+            .first(where: { fileManager.isExecutableFile(atPath: $0.path) }) {
+            return helper
+        }
+        candidates.removeAll(keepingCapacity: true)
+#endif
         if !executablePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let url = URL(fileURLWithPath: executablePath).standardizedFileURL
             if fileManager.isExecutableFile(atPath: url.path) { return url }
         }
-
-        var candidates = [
+        candidates += [
             "/opt/homebrew/bin/librespot",
             "/usr/local/bin/librespot",
             "/usr/bin/librespot",
@@ -90,17 +112,23 @@ final class LibrespotService {
     }
 
     var bundledExecutableURL: URL? {
-        let url = Bundle.main.bundleURL
+        let helpers = Bundle.main.bundleURL
             .appendingPathComponent("Contents", isDirectory: true)
             .appendingPathComponent("Helpers", isDirectory: true)
-            .appendingPathComponent("librespot")
-            .standardizedFileURL
-        return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
+        for name in ["uziq-librespot", "librespot"] {
+            let url = helpers.appendingPathComponent(name).standardizedFileURL
+            if FileManager.default.isExecutableFile(atPath: url.path) { return url }
+        }
+        return nil
     }
 
     var isUsingBundledExecutable: Bool {
         guard let bundledExecutableURL, let resolvedExecutableURL else { return false }
         return bundledExecutableURL == resolvedExecutableURL
+    }
+
+    var supportsDirectControl: Bool {
+        resolvedExecutableURL.map(isDirectHelper) == true
     }
 
     func start(using _: PlaybackEngine) {
@@ -122,18 +150,38 @@ final class LibrespotService {
             let process = Process()
             let stderrPipe = Pipe()
             process.executableURL = executable
-            process.arguments = [
-                "--name", "Uziq",
-                "--device-type", "computer",
-                "--bitrate", "320",
-                "--backend", "rodio",
-                "--system-cache", systemCache.path,
-                "--disable-audio-cache",
-                "--disable-discovery",
-                "--enable-oauth",
-                "--oauth-port", "5590"
-            ]
-            process.standardOutput = FileHandle.nullDevice
+            let directHelper = isDirectHelper(executable)
+            if directHelper {
+                process.arguments = [
+                    "--system-cache", systemCache.path,
+                    "--oauth-port", "5590"
+                ]
+                let stdinPipe = Pipe()
+                let stdoutPipe = Pipe()
+                process.standardInput = stdinPipe
+                process.standardOutput = stdoutPipe
+                self.stdinPipe = stdinPipe
+                self.stdoutPipe = stdoutPipe
+                stdoutBuffer.removeAll(keepingCapacity: true)
+                stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+                    let data = handle.availableData
+                    guard !data.isEmpty else { return }
+                    Task { @MainActor [weak self] in self?.consumeOutput(data) }
+                }
+            } else {
+                process.arguments = [
+                    "--name", "Uziq",
+                    "--device-type", "computer",
+                    "--bitrate", "320",
+                    "--backend", "rodio",
+                    "--system-cache", systemCache.path,
+                    "--disable-audio-cache",
+                    "--disable-discovery",
+                    "--enable-oauth",
+                    "--oauth-port", "5590"
+                ]
+                process.standardOutput = FileHandle.nullDevice
+            }
             process.standardError = stderrPipe
             self.process = process
             self.stderrPipe = stderrPipe
@@ -148,9 +196,15 @@ final class LibrespotService {
             process.terminationHandler = { [weak self, weak process] finished in
                 Task { @MainActor [weak self, weak process] in
                     guard let self, self.process === process else { return }
+                    self.stdoutPipe?.fileHandleForReading.readabilityHandler = nil
                     self.stderrPipe?.fileHandleForReading.readabilityHandler = nil
                     self.process = nil
+                    self.stdinPipe = nil
+                    self.stdoutPipe = nil
                     self.stderrPipe = nil
+                    self.stdoutBuffer.removeAll(keepingCapacity: false)
+                    self.pendingCommands.removeAll()
+                    self.isDirectPlaybackActive = false
                     if UserDefaults.standard.integer(forKey: self.processIDDefaultsKey) == Int(finished.processIdentifier) {
                         UserDefaults.standard.removeObject(forKey: self.processIDDefaultsKey)
                     }
@@ -169,9 +223,46 @@ final class LibrespotService {
             UserDefaults.standard.set(Int(process.processIdentifier), forKey: processIDDefaultsKey)
         } catch {
             self.process = nil
+            stdinPipe = nil
+            stdoutPipe = nil
             stderrPipe = nil
             status = .failed(error.localizedDescription)
         }
+    }
+
+    @discardableResult
+    func loadContext(_ uri: String, offsetURI: String? = nil, position: Double = 0) -> Bool {
+        let accepted = send(.loadContext(uri, offsetURI: offsetURI, positionMS: milliseconds(position)))
+        if accepted { isDirectPlaybackActive = true }
+        return accepted
+    }
+
+    @discardableResult
+    func loadTracks(_ uris: [String], offsetURI: String? = nil, position: Double = 0) -> Bool {
+        guard !uris.isEmpty else { return false }
+        let accepted = send(.loadTracks(uris, offsetURI: offsetURI, positionMS: milliseconds(position)))
+        if accepted { isDirectPlaybackActive = true }
+        return accepted
+    }
+
+    @discardableResult
+    func play() -> Bool { send(.transport("play")) }
+
+    @discardableResult
+    func pause() -> Bool { send(.transport("pause")) }
+
+    @discardableResult
+    func next() -> Bool { send(.transport("next")) }
+
+    @discardableResult
+    func previous() -> Bool { send(.transport("previous")) }
+
+    @discardableResult
+    func seek(to seconds: Double) -> Bool { send(.seek(positionMS: milliseconds(seconds))) }
+
+    @discardableResult
+    func setVolume(_ volume: Float) -> Bool {
+        send(.setVolume(Double(min(1, max(0, volume)))))
     }
 
     func stop() {
@@ -200,6 +291,7 @@ final class LibrespotService {
 
     private func consumeLog(_ text: String) {
         recentLog = String((recentLog + text).suffix(6_000))
+        guard process?.executableURL.map(isDirectHelper) != true else { return }
         let lowercased = text.lowercased()
         if lowercased.contains("authenticated as") || lowercased.contains("spirc") {
             status = .ready
@@ -211,6 +303,85 @@ final class LibrespotService {
                 status = .failed(line)
             }
         }
+    }
+
+    private func consumeOutput(_ data: Data) {
+        stdoutBuffer.append(data)
+        while let newline = stdoutBuffer.firstIndex(of: 0x0A) {
+            let line = Data(stdoutBuffer[..<newline])
+            stdoutBuffer.removeSubrange(...newline)
+            guard !line.isEmpty,
+                  let event = try? JSONDecoder().decode(LibrespotIPCEvent.self, from: line) else {
+                continue
+            }
+            consume(event)
+        }
+    }
+
+    private func consume(_ event: LibrespotIPCEvent) {
+        if event.event == "status" {
+            switch event.state {
+            case "starting": status = .starting
+            case "authenticating": status = .authenticating
+            case "ready":
+                status = .ready
+                flushPendingCommands()
+            default: break
+            }
+        } else if event.event == "error", let message = event.message {
+            recentLog = String((recentLog + "\n" + message).suffix(6_000))
+        }
+
+        switch event.event {
+        case "loading", "track_changed", "playing", "paused", "position", "seeked":
+            isDirectPlaybackActive = true
+        case "unavailable":
+            isDirectPlaybackActive = false
+        default:
+            break
+        }
+        onEvent?(event)
+    }
+
+    private func send(_ command: LibrespotIPCCommand) -> Bool {
+        guard supportsDirectControl else { return false }
+        if process?.isRunning != true { startProcess() }
+        guard process?.isRunning == true,
+              var data = try? JSONEncoder().encode(command) else { return false }
+        data.append(0x0A)
+        if status == .ready {
+            return writeCommand(data)
+        }
+        pendingCommands.append(data)
+        return true
+    }
+
+    private func flushPendingCommands() {
+        let commands = pendingCommands
+        pendingCommands.removeAll(keepingCapacity: true)
+        for command in commands where !writeCommand(command) {
+            pendingCommands.append(command)
+        }
+    }
+
+    private func writeCommand(_ data: Data) -> Bool {
+        guard let handle = stdinPipe?.fileHandleForWriting else { return false }
+        do {
+            try handle.write(contentsOf: data)
+            return true
+        } catch {
+            status = .failed("Could not communicate with the Spotify helper: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func milliseconds(_ seconds: Double) -> UInt32 {
+        guard seconds.isFinite, seconds > 0 else { return 0 }
+        return UInt32(min(Double(UInt32.max), seconds * 1_000))
+    }
+
+    private func isDirectHelper(_ url: URL) -> Bool {
+        url.lastPathComponent.lowercased().contains("uziq-librespot")
     }
 
     private func makeSystemCacheDirectory() throws -> URL {
@@ -251,6 +422,7 @@ final class LibrespotService {
     }
 
     private func terminateForAppExit() {
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         if let process, process.isRunning { process.terminate() }
         UserDefaults.standard.removeObject(forKey: processIDDefaultsKey)
@@ -260,6 +432,7 @@ final class LibrespotService {
         if let appTerminationObserver { NotificationCenter.default.removeObserver(appTerminationObserver) }
         if let sleepObserver { NotificationCenter.default.removeObserver(sleepObserver) }
         if let wakeObserver { NotificationCenter.default.removeObserver(wakeObserver) }
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         if process?.isRunning == true { process?.terminate() }
     }

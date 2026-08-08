@@ -19,7 +19,7 @@ final class DiagnosticsLog: @unchecked Sendable {
     }
 
     func record(_ category: String, _ message: String) {
-        let line = "\(Self.timestamp.string(from: .now)) [\(category)] \(Self.redact(message))\n"
+        let line = "\(Self.timestamp(for: .now)) [\(category)] \(Self.redact(message))\n"
         guard let data = line.data(using: .utf8) else { return }
 
         lock.lock()
@@ -77,11 +77,11 @@ final class DiagnosticsLog: @unchecked Sendable {
         return redacted
     }
 
-    private static let timestamp: ISO8601DateFormatter = {
+    private static func timestamp(for date: Date) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
+        return formatter.string(from: date)
+    }
 }
 
 @MainActor
@@ -147,6 +147,7 @@ enum DiagnosticsReport {
             "Spotify Web API connected: \(yesNo(spotify.isAuthorized))",
             "Spotify playback engine: \(spotify.librespot.status.title)",
             "Spotify helper bundled: \(yesNo(spotify.librespot.isUsingBundledExecutable))",
+            "Spotify local transport control: \(yesNo(spotify.librespot.supportsDirectControl))",
             "Jellyfin connected: \(yesNo(jellyfin.isConnected))",
             "Jellyfin server name: \(jellyfin.serverName ?? "Unavailable")",
             "Jellyfin cache: \(byteCount(jellyfin.cacheBytes)) in \(jellyfin.cachedFileCount) files",
