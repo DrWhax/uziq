@@ -12,7 +12,7 @@ swift run
 
 The app targets macOS 15 or newer.
 
-To build a normal, ad-hoc-signed macOS application using `Images/logo.png` as its icon:
+To build a normal, ad-hoc-signed macOS application with hardened runtime enabled, using `Images/logo.png` as its icon:
 
 ```sh
 ./Scripts/build-app.sh
@@ -20,6 +20,14 @@ open dist/Uziq.app
 ```
 
 The application bundle is written to `dist/Uziq.app`. A Developer ID signature and notarization can be added later for public distribution.
+
+To create family-distribution artifacts without an Apple signing certificate:
+
+```sh
+./Scripts/package-release.sh release
+```
+
+This creates a versioned DMG, ZIP, and SHA-256 checksum file in `dist/`. On the destination Mac, drag Uziq into Applications, then Control-click it and choose **Open** for the first launch. This one-time approval is required because an ad-hoc-signed app is not Apple-notarized.
 
 ## Playback controls
 
@@ -68,7 +76,9 @@ The password is used only for sign-in and is never stored. The access token is s
 
 ## Packaging
 
-Run `Scripts/build-app.sh release` to create `dist/Uziq.app`. The script bundles the installed librespot executable and its MIT license, verifies that its architecture matches Uziq, and signs the complete app bundle. Set `UZIQ_LIBRESPOT_PATH=/path/to/librespot` to package a specific build.
+Run `Scripts/build-app.sh release` to create `dist/Uziq.app`. The script bundles librespot, its MIT license, the app icon, and runtime resources; verifies that their architecture matches Uziq; and ad-hoc signs the complete app and helper with hardened runtime enabled. It prefers the repository's ignored `./librespot` binary, then an installed binary on `PATH`. Set `UZIQ_LIBRESPOT_PATH=/path/to/librespot` to package a specific build.
+
+Run `Scripts/package-release.sh release` to additionally create a compressed DMG, ZIP fallback, and checksum file. The DMG includes an Applications shortcut and first-launch instructions. The artifact filename records the Uziq version and supported architecture, such as `Uziq-0.2.0-macOS-arm64.dmg`.
 
 For a family build that requires no Spotify developer configuration on the destination Mac, package the non-secret Client ID into the app:
 

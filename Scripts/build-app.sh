@@ -4,9 +4,10 @@ set -euo pipefail
 script_dir=${0:A:h}
 project_dir=${script_dir:h}
 configuration=${1:-release}
-app_dir="$project_dir/dist/Uziq.app"
+dist_dir="$project_dir/dist"
+app_dir="$dist_dir/Uziq.app"
 contents_dir="$app_dir/Contents"
-iconset_dir="$project_dir/dist/Uziq.iconset"
+iconset_dir="$dist_dir/Uziq.iconset"
 helpers_dir="$contents_dir/Helpers"
 notices_dir="$contents_dir/Resources/ThirdPartyNotices"
 
@@ -30,6 +31,9 @@ if [[ -n "$spotify_client_id" ]]; then
 fi
 
 librespot_source=${UZIQ_LIBRESPOT_PATH:-}
+if [[ -z "$librespot_source" && -x "$project_dir/librespot" ]]; then
+    librespot_source="$project_dir/librespot"
+fi
 if [[ -z "$librespot_source" ]]; then
     librespot_source=$(command -v librespot || true)
 fi
@@ -62,8 +66,11 @@ done
 iconutil -c icns "$iconset_dir" -o "$contents_dir/Resources/AppIcon.icns"
 rm -rf "$iconset_dir"
 
-codesign --force --sign - "$helpers_dir/librespot"
-codesign --force --deep --sign - "$app_dir"
-codesign --verify --deep --strict "$app_dir"
+plutil -lint "$contents_dir/Info.plist" >/dev/null
+codesign --force --options runtime --timestamp=none --sign - --identifier com.crambledeggs.uziq.librespot "$helpers_dir/librespot"
+codesign --force --options runtime --timestamp=none --sign - "$app_dir"
+codesign --verify --strict --verbose=2 "$helpers_dir/librespot"
+codesign --verify --deep --strict --verbose=2 "$app_dir"
 echo "Bundled librespot from $librespot_source ($helper_archs)"
+echo "Bundled signed application resources and third-party notices"
 echo "$app_dir"

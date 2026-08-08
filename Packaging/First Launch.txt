@@ -1,0 +1,13 @@
+Installing Uziq
+===============
+
+1. Drag Uziq into the Applications folder.
+2. In Applications, Control-click Uziq and choose Open.
+3. Confirm Open in the security prompt.
+
+The extra first-launch step is required because this family build is ad-hoc
+signed rather than notarized with an Apple Developer ID certificate. After the
+first approval, Uziq can be opened normally from Applications or the Dock.
+
+Uziq requires macOS 15 or newer. This package includes its Spotify playback
+helper; no separate librespot installation or binary selection is required.
