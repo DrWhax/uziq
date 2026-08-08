@@ -2,6 +2,26 @@ import XCTest
 @testable import Uziq
 
 final class PlaybackQueueTests: XCTestCase {
+    @MainActor
+    func testVolumeClampingDoesNotReenterTheObservableSetter() {
+        let sessionURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("uziq-volume-test-\(UUID().uuidString).json")
+        let queue = PlaybackQueueStore(sessionURL: sessionURL)
+
+        queue.volume = 0.42
+        XCTAssertEqual(queue.volume, 0.42, accuracy: 0.001)
+        queue.volume = 2
+        XCTAssertEqual(queue.volume, 1, accuracy: 0.001)
+        queue.volume = -.infinity
+        XCTAssertEqual(queue.volume, 1, accuracy: 0.001)
+        queue.volume = 0.42
+
+        let restoredQueue = PlaybackQueueStore(sessionURL: sessionURL)
+        XCTAssertEqual(restoredQueue.volume, 0.42, accuracy: 0.001)
+
+        try? FileManager.default.removeItem(at: sessionURL)
+    }
+
     func testSpotifyQueueItemRoundTripsWithoutLosingPlaybackIdentity() throws {
         let spotifyItem = SpotifyCatalogItem(
             id: "track-123",

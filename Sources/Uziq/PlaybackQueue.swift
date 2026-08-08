@@ -104,17 +104,21 @@ final class PlaybackQueueStore {
     private(set) var items: [UnifiedQueueItem] = []
     private(set) var currentIndex: Int?
     var shuffleEnabled = false {
-        didSet { persistSession() }
+        didSet { if !isRestoringSession { persistSession() } }
     }
     var repeatMode: PlaybackRepeatMode = .off {
-        didSet { persistSession() }
+        didSet { if !isRestoringSession { persistSession() } }
     }
-    var volume: Float = 1 {
-        didSet {
-            volume = min(1, max(0, volume))
-            playback?.volume = volume
-            spotify?.setVolume(volume)
-            persistSession()
+    private var volumeValue: Float = 1
+    var volume: Float {
+        get { volumeValue }
+        set {
+            let clamped = newValue.isFinite ? min(1, max(0, newValue)) : 1
+            guard volumeValue != clamped else { return }
+            volumeValue = clamped
+            playback?.volume = clamped
+            spotify?.setVolume(clamped)
+            if !isRestoringSession { persistSession() }
         }
     }
     private(set) var restoredPosition = 0.0
@@ -129,8 +133,11 @@ final class PlaybackQueueStore {
     @ObservationIgnored private var persistTimer: Timer?
     @ObservationIgnored private var spotifyPlaybackSeen = false
     @ObservationIgnored private var isDispatching = false
+    @ObservationIgnored private var isRestoringSession = false
+    @ObservationIgnored private let sessionURLOverride: URL?
 
-    init() {
+    init(sessionURL: URL? = nil) {
+        sessionURLOverride = sessionURL
         restoreSession()
         finishObserver = NotificationCenter.default.addObserver(
             forName: .uziqPlaybackItemFinished,
@@ -473,6 +480,7 @@ final class PlaybackQueueStore {
     }
 
     private var sessionURL: URL {
+        if let sessionURLOverride { return sessionURLOverride }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Uziq", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -482,6 +490,8 @@ final class PlaybackQueueStore {
     private func restoreSession() {
         guard let data = try? Data(contentsOf: sessionURL),
               let session = try? JSONDecoder().decode(PlaybackSession.self, from: data) else { return }
+        isRestoringSession = true
+        defer { isRestoringSession = false }
         items = session.items
         currentIndex = session.currentIndex.flatMap { session.items.indices.contains($0) ? $0 : nil }
         restoredPosition = max(0, session.position)
