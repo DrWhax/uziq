@@ -114,6 +114,12 @@ enum LibrespotPlayerEvent: String, Equatable, Sendable {
     case stopped
 }
 
+enum SpotifyHelperCompletionAction: Equatable, Sendable {
+    case advanceUziqQueue
+    case advanceHelperContext
+    case stop
+}
+
 struct LibrespotIPCEvent: Decodable, Equatable, Sendable {
     let event: String
     let state: String?

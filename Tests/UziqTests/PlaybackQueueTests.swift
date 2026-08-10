@@ -2,6 +2,38 @@ import XCTest
 @testable import Uziq
 
 final class PlaybackQueueTests: XCTestCase {
+    func testRestoredSpotifyTrackQueueKeepsSequenceOwnership() {
+        let track = SpotifyCatalogItem(
+            id: "track-id",
+            name: "Track",
+            subtitle: "Artist",
+            uri: "spotify:track:track-id",
+            kind: .track,
+            artworkURL: nil,
+            durationMS: 180_000,
+            itemCount: nil
+        )
+        let album = SpotifyCatalogItem(
+            id: "album-id",
+            name: "Album",
+            subtitle: "Artist",
+            uri: "spotify:album:album-id",
+            kind: .album,
+            artworkURL: nil,
+            durationMS: nil,
+            itemCount: 10
+        )
+
+        XCTAssertFalse(PlaybackQueueStore.shouldDelegateSpotifySequenceToHelper(
+            currentItem: UnifiedQueueItem(spotify: track),
+            helperControlsPlaybackSequence: true
+        ))
+        XCTAssertTrue(PlaybackQueueStore.shouldDelegateSpotifySequenceToHelper(
+            currentItem: UnifiedQueueItem(spotify: album),
+            helperControlsPlaybackSequence: true
+        ))
+    }
+
     @MainActor
     func testVolumeClampingDoesNotReenterTheObservableSetter() {
         let sessionURL = FileManager.default.temporaryDirectory

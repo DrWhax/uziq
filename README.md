@@ -82,7 +82,7 @@ The password is used only for sign-in and is never stored. The access token is s
 
 Run `Scripts/build-app.sh release` to create `dist/Uziq.app`. The script builds and bundles `uziq-librespot`, its MIT license, the app icon, and runtime resources; verifies that the helper architecture matches Uziq; and ad-hoc signs the complete app and helper with hardened runtime enabled. Set `UZIQ_LIBRESPOT_PATH=/path/to/helper` only when testing a specific helper build.
 
-Run `Scripts/package-release.sh release` to additionally create a compressed DMG, ZIP fallback, and checksum file. The DMG includes an Applications shortcut and first-launch instructions. The artifact filename records the Uziq version and supported architecture, such as `Uziq-1.0.0-macOS-arm64.dmg`.
+Run `Scripts/package-release.sh release` to additionally create a compressed DMG, ZIP fallback, and checksum file. The DMG includes an Applications shortcut and first-launch instructions. The artifact filename records the Uziq version and supported architecture, such as `Uziq-1.0.1-macOS-arm64.dmg`.
 
 For a family build that requires no Spotify developer configuration on the destination Mac, package the non-secret Client ID into the app:
 

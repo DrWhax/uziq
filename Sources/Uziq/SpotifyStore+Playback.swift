@@ -52,12 +52,40 @@ extension SpotifyStore {
         isDirectPlaybackActive && !isSpotifyPlaybackSuppressed && !helperAdvancesWithUziqQueue
     }
 
+    nonisolated static func helperCompletionAction(
+        isDirectPlaybackActive: Bool,
+        isSpotifyPlaybackSuppressed: Bool,
+        helperAdvancesWithUziqQueue: Bool
+    ) -> SpotifyHelperCompletionAction {
+        if helperAdvancesWithUziqQueue { return .advanceUziqQueue }
+        if helperControlsPlaybackSequence(
+            isDirectPlaybackActive: isDirectPlaybackActive,
+            isSpotifyPlaybackSuppressed: isSpotifyPlaybackSuppressed,
+            helperAdvancesWithUziqQueue: helperAdvancesWithUziqQueue
+        ) {
+            return .advanceHelperContext
+        }
+        return .stop
+    }
+
     var helperControlsPlaybackSequence: Bool {
         Self.helperControlsPlaybackSequence(
             isDirectPlaybackActive: librespot.isDirectPlaybackActive,
             isSpotifyPlaybackSuppressed: isSpotifyPlaybackSuppressed,
             helperAdvancesWithUziqQueue: helperAdvancesWithUziqQueue
         )
+    }
+
+    var hasControllablePlayback: Bool {
+        !isSpotifyPlaybackSuppressed &&
+            (librespot.isDirectPlaybackActive || isUziqPlaybackActive)
+    }
+
+    var isPlaying: Bool {
+        if librespot.isDirectPlaybackActive, !isSpotifyPlaybackSuppressed {
+            return librespot.isDirectPlaybackPlaying
+        }
+        return playback?.isPlaying == true
     }
 
     func playDirectInput(using queue: PlaybackQueueStore) {
@@ -200,7 +228,12 @@ extension SpotifyStore {
 
     func togglePlayback() {
         if librespot.isDirectPlaybackActive, !isSpotifyPlaybackSuppressed {
-            playback?.isPlaying == true ? pause() : resume()
+            if librespot.togglePlayback() {
+                updateHelperPlayback(
+                    position: playback?.effectiveProgress(at: .now),
+                    isPlaying: librespot.isDirectPlaybackPlaying
+                )
+            }
             return
         }
         guard isAuthorized else { return }
@@ -529,22 +562,12 @@ extension SpotifyStore {
                 position: playback?.duration,
                 isPlaying: false
             )
-            let shouldAdvance = helperAdvancesWithUziqQueue
-            helperAdvancesWithUziqQueue = false
-            helperPendingItem = nil
-            if shouldAdvance {
-                NotificationCenter.default.post(name: .uziqPlaybackItemFinished, object: nil)
-            }
+            advanceAfterHelperTrackCompletion()
         case "unavailable":
             isStartingPlayback = false
             playbackMessage = nil
-            error = "Spotify could not stream this track through the Uziq helper."
-            let shouldAdvance = helperAdvancesWithUziqQueue
-            helperAdvancesWithUziqQueue = false
-            helperPendingItem = nil
-            if shouldAdvance {
-                NotificationCenter.default.post(name: .uziqPlaybackItemFinished, object: nil)
-            }
+            error = "Spotify skipped a track that the Uziq helper could not stream."
+            advanceAfterHelperTrackCompletion()
         case "error":
             isStartingPlayback = false
             playbackMessage = nil
@@ -554,16 +577,40 @@ extension SpotifyStore {
         }
     }
 
+    private func advanceAfterHelperTrackCompletion() {
+        let action = Self.helperCompletionAction(
+            isDirectPlaybackActive: librespot.isDirectPlaybackActive,
+            isSpotifyPlaybackSuppressed: isSpotifyPlaybackSuppressed,
+            helperAdvancesWithUziqQueue: helperAdvancesWithUziqQueue
+        )
+        helperPendingItem = nil
+        switch action {
+        case .advanceUziqQueue:
+            // Keep queue ownership set until PlaybackQueueStore handles the
+            // asynchronous completion notification. Clearing it here makes
+            // `next()` mistake a multi-track Uziq queue for a helper context.
+            NotificationCenter.default.post(name: .uziqPlaybackItemFinished, object: nil)
+        case .advanceHelperContext:
+            if !librespot.next() {
+                error = "Spotify finished the track but could not advance the current context."
+            }
+        case .stop:
+            helperAdvancesWithUziqQueue = false
+        }
+    }
+
     func updateHelperPlayback(
         uri: String? = nil,
         position: Double? = nil,
         isPlaying: Bool
     ) {
         guard let current = playback else { return }
-        let identifier = uri?
+        let eventIdentifier = uri?
             .split(separator: ":")
             .last
-            .map(String.init) ?? current.itemID
+            .map(String.init)
+        guard eventIdentifier == nil || eventIdentifier == current.itemID else { return }
+        let identifier = eventIdentifier ?? current.itemID
         playback = SpotifyPlaybackSnapshot(
             itemID: identifier,
             title: current.title,

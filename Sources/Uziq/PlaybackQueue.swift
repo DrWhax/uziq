@@ -129,6 +129,18 @@ private struct PlaybackSession: Codable {
 @MainActor
 @Observable
 final class PlaybackQueueStore {
+    nonisolated static func shouldDelegateSpotifySequenceToHelper(
+        currentItem: UnifiedQueueItem?,
+        helperControlsPlaybackSequence: Bool
+    ) -> Bool {
+        guard helperControlsPlaybackSequence,
+              currentItem?.source == .spotify else { return false }
+        // Track lists (albums, search results, radio, and restored sessions)
+        // are represented as individual queue items, so Uziq owns Next/Back.
+        // Only an opaque album/playlist/artist context is advanced by librespot.
+        return currentItem?.spotifyItem?.kind != .track
+    }
+
     private(set) var items: [UnifiedQueueItem] = []
     private(set) var currentIndex: Int?
     var shuffleEnabled = false {
@@ -347,7 +359,7 @@ final class PlaybackQueueStore {
         }
         switch currentItem.source {
         case .spotify:
-            if spotify?.isUziqPlaybackActive == true {
+            if spotify?.hasControllablePlayback == true {
                 spotify?.togglePlayback()
             } else {
                 dispatchCurrent()
@@ -364,12 +376,21 @@ final class PlaybackQueueStore {
     }
 
     func pause() {
-        if isPlaying { toggle() }
+        if currentItem?.source == .spotify,
+           spotify?.hasControllablePlayback == true {
+            spotify?.pause()
+            persistSession()
+            updateNowPlaying(force: true)
+        } else if isPlaying {
+            toggle()
+        }
     }
 
     func next() {
-        if currentItem?.source == .spotify,
-           spotify?.helperControlsPlaybackSequence == true {
+        if Self.shouldDelegateSpotifySequenceToHelper(
+            currentItem: currentItem,
+            helperControlsPlaybackSequence: spotify?.helperControlsPlaybackSequence == true
+        ) {
             if repeatMode == .one {
                 seek(to: 0)
                 spotify?.resume()
@@ -407,8 +428,10 @@ final class PlaybackQueueStore {
             seek(to: 0)
             return
         }
-        if currentItem?.source == .spotify,
-           spotify?.helperControlsPlaybackSequence == true {
+        if Self.shouldDelegateSpotifySequenceToHelper(
+            currentItem: currentItem,
+            helperControlsPlaybackSequence: spotify?.helperControlsPlaybackSequence == true
+        ) {
             restoredPosition = 0
             spotify?.previous()
             persistSession()
@@ -437,7 +460,7 @@ final class PlaybackQueueStore {
 
     var isPlaying: Bool {
         currentItem?.source == .spotify
-            ? spotify?.playback?.isPlaying == true
+            ? spotify?.isPlaying == true
             : playback?.isPlaying == true
     }
 

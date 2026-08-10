@@ -160,6 +160,12 @@ final class SpotifyTests: XCTestCase {
         XCTAssertEqual(commandJSON["offset_uri"] as? String, "spotify:track:track-id")
         XCTAssertEqual(commandJSON["position_ms"] as? Int, 12_500)
 
+        let toggleData = try JSONEncoder().encode(LibrespotIPCCommand.transport("toggle"))
+        let toggleJSON = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: toggleData) as? [String: Any]
+        )
+        XCTAssertEqual(toggleJSON["command"] as? String, "toggle")
+
         let eventData = #"{"event":"track_changed","uri":"spotify:track:track-id","title":"Track","artist":"Artist","album":"Album","artwork_url":"https://i.scdn.co/image/cover","duration_ms":123000}"#.data(using: .utf8)!
         let event = try JSONDecoder().decode(LibrespotIPCEvent.self, from: eventData)
 
@@ -210,6 +216,24 @@ final class SpotifyTests: XCTestCase {
             isSpotifyPlaybackSuppressed: false,
             helperAdvancesWithUziqQueue: false
         ))
+    }
+
+    func testCompletedSpotifyTrackPreservesItsSequenceOwner() {
+        XCTAssertEqual(SpotifyStore.helperCompletionAction(
+            isDirectPlaybackActive: true,
+            isSpotifyPlaybackSuppressed: false,
+            helperAdvancesWithUziqQueue: false
+        ), .advanceHelperContext)
+        XCTAssertEqual(SpotifyStore.helperCompletionAction(
+            isDirectPlaybackActive: true,
+            isSpotifyPlaybackSuppressed: false,
+            helperAdvancesWithUziqQueue: true
+        ), .advanceUziqQueue)
+        XCTAssertEqual(SpotifyStore.helperCompletionAction(
+            isDirectPlaybackActive: true,
+            isSpotifyPlaybackSuppressed: true,
+            helperAdvancesWithUziqQueue: false
+        ), .stop)
     }
 
     func testDirectHelperIsPausedWhenAnotherPlaybackSourceTakesOver() {

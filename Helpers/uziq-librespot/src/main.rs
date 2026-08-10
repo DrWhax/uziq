@@ -55,6 +55,7 @@ enum Command {
         position_ms: u32,
     },
     Play,
+    Toggle,
     Pause,
     Next,
     Previous,
@@ -250,6 +251,7 @@ fn handle_command(
             })
         }
         Command::Play => spirc.play(),
+        Command::Toggle => spirc.play_pause(),
         Command::Pause => spirc.pause(),
         Command::Next => spirc.next(),
         Command::Previous => spirc.prev(),

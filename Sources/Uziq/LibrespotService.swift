@@ -14,6 +14,7 @@ final class LibrespotService {
     private(set) var status: LibrespotStatus = .stopped
     private(set) var recentLog = ""
     private(set) var isDirectPlaybackActive = false
+    private(set) var isDirectPlaybackPlaying = false
     var onEvent: ((LibrespotIPCEvent) -> Void)?
 
     @ObservationIgnored private var process: Process?
@@ -28,6 +29,7 @@ final class LibrespotService {
     @ObservationIgnored private var sleepObserver: NSObjectProtocol?
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
     @ObservationIgnored private var wasRunningBeforeSleep = false
+    @ObservationIgnored private var directPlaybackURI: String?
 
     private let processIDDefaultsKey = "librespot-process-id"
 
@@ -205,6 +207,8 @@ final class LibrespotService {
                     self.stdoutBuffer.removeAll(keepingCapacity: false)
                     self.pendingCommands.removeAll()
                     self.isDirectPlaybackActive = false
+                    self.isDirectPlaybackPlaying = false
+                    self.directPlaybackURI = nil
                     if UserDefaults.standard.integer(forKey: self.processIDDefaultsKey) == Int(finished.processIdentifier) {
                         UserDefaults.standard.removeObject(forKey: self.processIDDefaultsKey)
                     }
@@ -233,7 +237,11 @@ final class LibrespotService {
     @discardableResult
     func loadContext(_ uri: String, offsetURI: String? = nil, position: Double = 0) -> Bool {
         let accepted = send(.loadContext(uri, offsetURI: offsetURI, positionMS: milliseconds(position)))
-        if accepted { isDirectPlaybackActive = true }
+        if accepted {
+            directPlaybackURI = offsetURI
+            isDirectPlaybackActive = true
+            isDirectPlaybackPlaying = false
+        }
         return accepted
     }
 
@@ -241,15 +249,34 @@ final class LibrespotService {
     func loadTracks(_ uris: [String], offsetURI: String? = nil, position: Double = 0) -> Bool {
         guard !uris.isEmpty else { return false }
         let accepted = send(.loadTracks(uris, offsetURI: offsetURI, positionMS: milliseconds(position)))
-        if accepted { isDirectPlaybackActive = true }
+        if accepted {
+            directPlaybackURI = offsetURI ?? uris.first
+            isDirectPlaybackActive = true
+            isDirectPlaybackPlaying = false
+        }
         return accepted
     }
 
     @discardableResult
-    func play() -> Bool { send(.transport("play")) }
+    func play() -> Bool {
+        let accepted = send(.transport("play"))
+        if accepted { isDirectPlaybackPlaying = true }
+        return accepted
+    }
 
     @discardableResult
-    func pause() -> Bool { send(.transport("pause")) }
+    func togglePlayback() -> Bool {
+        let accepted = send(.transport("toggle"))
+        if accepted { isDirectPlaybackPlaying.toggle() }
+        return accepted
+    }
+
+    @discardableResult
+    func pause() -> Bool {
+        let accepted = send(.transport("pause"))
+        if accepted { isDirectPlaybackPlaying = false }
+        return accepted
+    }
 
     @discardableResult
     func next() -> Bool { send(.transport("next")) }
@@ -333,14 +360,32 @@ final class LibrespotService {
         }
 
         switch event.event {
-        case "loading", "track_changed", "playing", "paused", "position", "seeked":
+        case "loading", "track_changed":
+            if let uri = event.uri { directPlaybackURI = uri }
+            isDirectPlaybackActive = true
+        case "playing":
+            if let uri = event.uri { directPlaybackURI = uri }
+            isDirectPlaybackActive = true
+            isDirectPlaybackPlaying = true
+        case "paused", "end_of_track", "stopped":
+            guard eventBelongsToCurrentTrack(event.uri) else { return }
+            isDirectPlaybackPlaying = false
+        case "position", "seeked":
+            guard eventBelongsToCurrentTrack(event.uri) else { return }
             isDirectPlaybackActive = true
         case "unavailable":
+            guard eventBelongsToCurrentTrack(event.uri) else { return }
             isDirectPlaybackActive = false
+            isDirectPlaybackPlaying = false
         default:
             break
         }
         onEvent?(event)
+    }
+
+    private func eventBelongsToCurrentTrack(_ eventURI: String?) -> Bool {
+        guard let eventURI, let directPlaybackURI else { return true }
+        return eventURI == directPlaybackURI
     }
 
     private func send(_ command: LibrespotIPCCommand) -> Bool {

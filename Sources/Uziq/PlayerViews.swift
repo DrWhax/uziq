@@ -341,12 +341,13 @@ private struct PlayerTimeline: View {
 
 struct PlayerTransportControls: View {
     @Environment(PlaybackQueueStore.self) private var queue
+    @Environment(SpotifyStore.self) private var spotify
 
     var body: some View {
         HStack(spacing: 12) {
             transportButton("backward.fill", size: 36, action: queue.previous)
             Button(action: queue.toggle) {
-                Image(systemName: queue.isPlaying ? "pause.fill" : "play.fill")
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                     .font(.system(size: 17, weight: .bold)).foregroundStyle(.white)
                     .frame(width: 48, height: 48)
                     .background(Color.accentColor.gradient, in: Circle())
@@ -356,6 +357,13 @@ struct PlayerTransportControls: View {
             transportButton("forward.fill", size: 36, action: queue.next)
         }
         .disabled(queue.currentItem == nil && queue.items.isEmpty)
+    }
+
+    private var isPlaying: Bool {
+        if queue.currentItem?.source == .spotify {
+            return spotify.playback?.isPlaying == true
+        }
+        return queue.isPlaying
     }
 
     private func transportButton(_ image: String, size: CGFloat, action: @escaping () -> Void) -> some View {
@@ -573,5 +581,4 @@ private final class ArtworkImageCache: @unchecked Sendable {
         return "\(data.count)-\(hash)" as NSString
     }
 }
-
 
