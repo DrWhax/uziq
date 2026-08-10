@@ -51,12 +51,47 @@ struct BandcampLibraryView: View {
             .padding(.bottom, 18)
 
             if !showingSavedOnly && bandcamp.isAuthenticated {
+                BandcampAccountHeaderView(
+                    profile: bandcamp.accountProfile,
+                    collectionCount: bandcamp.ownedResults.count,
+                    wishlistCount: bandcamp.wishlistResults.count,
+                    followedCount: bandcamp.followedArtists.count,
+                    lastUpdated: bandcamp.accountLastUpdated,
+                    isRefreshing: bandcamp.isLoadingCollection,
+                    onRefresh: { bandcamp.loadCollection(force: true) }
+                )
+                .padding(.bottom, 22)
+
                 accountCollectionSection
-                    .padding(.bottom, 18)
+                    .padding(.bottom, 22)
+
+                BandcampAccountArtistCarousel(
+                    artists: bandcamp.followedArtists,
+                    onOpen: { selectedArtist = $0 }
+                )
+                .padding(.bottom, 22)
+
+                BandcampAccountReleaseCarousel(
+                    title: "New From Artists You Follow",
+                    subtitle: "Recent releases from your Bandcamp feed",
+                    emptyMessage: "No new followed-artist releases were returned yet.",
+                    releases: bandcamp.accountNewReleases,
+                    onOpen: { selectedOwnedRelease = $0 }
+                )
+                .padding(.bottom, 22)
+
+                BandcampAccountReleaseCarousel(
+                    title: "Wishlist",
+                    subtitle: "\(bandcamp.wishlistResults.count) release\(bandcamp.wishlistResults.count == 1 ? "" : "s") saved to your Bandcamp account",
+                    emptyMessage: "Your Bandcamp wishlist is empty.",
+                    releases: bandcamp.wishlistResults,
+                    onOpen: { selectedOwnedRelease = $0 }
+                )
+                .padding(.bottom, 22)
             }
 
             if !showingSavedOnly {
-                if bandcamp.isAuthenticated || !bandcamp.subscriptions.isEmpty {
+                if artistSubscriptionCount > 0 {
                     artistSubscriptionSection
                         .padding(.bottom, 18)
                 }
@@ -148,7 +183,7 @@ struct BandcampLibraryView: View {
                 BandcampSubscriptionSheet()
             }
             .task {
-                if bandcamp.isAuthenticated && bandcamp.ownedResults.isEmpty && !bandcamp.isLoadingCollection {
+                if bandcamp.isAuthenticated && bandcamp.accountLastUpdated == nil && !bandcamp.isLoadingCollection {
                     bandcamp.loadCollection()
                 }
                 if !bandcamp.isAuthenticated && bandcamp.subscriptions.isEmpty && bandcamp.savedResults.isEmpty {
@@ -189,7 +224,7 @@ struct BandcampLibraryView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Artist Subscriptions")
+                    Text(bandcamp.isAuthenticated ? "Uziq Discovery Artists" : "Artist Subscriptions")
                         .font(.title3.weight(.semibold))
                     HStack(spacing: 4) {
                         Text("\(artistSubscriptionCount) artist\(artistSubscriptionCount == 1 ? "" : "s") saved in Uziq")
@@ -273,15 +308,6 @@ struct BandcampLibraryView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Spacer()
-                Button {
-                    bandcamp.loadCollection()
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(bandcamp.isLoadingCollection)
             }
             .padding(.horizontal, 28)
 
@@ -325,7 +351,8 @@ struct BandcampLibraryView: View {
     }
 
     private var collectionSubtitle: String {
-        let owner = bandcamp.accountEmail.isEmpty ? "Connected account" : bandcamp.accountEmail
+        let owner = bandcamp.accountProfile?.displayName
+            ?? (bandcamp.accountEmail.isEmpty ? "Connected account" : bandcamp.accountEmail)
         let count = bandcamp.ownedResults.count
         guard count > 0 else { return owner }
         return "\(owner) · \(count) \(count == 1 ? "release" : "releases")"
@@ -508,6 +535,19 @@ struct BandcampArtistDetailView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .disabled(isLoading)
+
+                            if bandcamp.isAuthenticated, artist.bandID != nil {
+                                Button {
+                                    bandcamp.toggleFollowing(artist)
+                                } label: {
+                                    Label(
+                                        bandcamp.isFollowing(artist) ? "Following" : "Follow",
+                                        systemImage: bandcamp.isFollowing(artist) ? "person.fill.checkmark" : "person.badge.plus"
+                                    )
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(bandcamp.isUpdatingFollow(artist))
+                            }
 
                             Button("Open in Bandcamp") {
                                 NSWorkspace.shared.open(artist.openURL)
@@ -700,6 +740,22 @@ struct BandcampReleaseDetailView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .disabled(bandcamp.preparingPlaybackResultID != nil)
+
+                            if bandcamp.isAuthenticated,
+                               result.bandID != nil,
+                               result.tralbumID != nil {
+                                Button {
+                                    bandcamp.toggleWishlist(result)
+                                } label: {
+                                    Label(
+                                        bandcamp.isWishlisted(result) ? "Wishlisted" : "Wishlist",
+                                        systemImage: bandcamp.isWishlisted(result) ? "heart.fill" : "heart"
+                                    )
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(bandcamp.isWishlisted(result) ? .pink : nil)
+                                .disabled(bandcamp.isUpdatingWishlist(result))
+                            }
 
                             Button("Open in Browser") {
                                 NSWorkspace.shared.open(result.openURL)

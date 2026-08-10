@@ -8,6 +8,11 @@ final class BandcampStore {
     var results: [BandcampResult] = []
     var savedResults: [BandcampResult] = []
     var ownedResults: [BandcampResult] = []
+    var wishlistResults: [BandcampResult] = []
+    var followedArtists: [BandcampResult] = []
+    var accountNewReleases: [BandcampResult] = []
+    var accountProfile: BandcampAccountProfile?
+    var accountLastUpdated: Date?
     var subscribedArtists: [BandcampResult] = []
     var artistSubscriptionsCheckedAt: Date?
     var query = ""
@@ -35,6 +40,7 @@ final class BandcampStore {
     @ObservationIgnored private let client = BandcampClient()
     @ObservationIgnored private let authClient = BandcampAuthClient()
     @ObservationIgnored private let cache = BandcampCacheManager()
+    @ObservationIgnored private let accountCache = BandcampAccountCache()
     @ObservationIgnored private let defaults = UserDefaults.standard
     @ObservationIgnored private let subscriptionsKey = "bandcamp-subscriptions"
     @ObservationIgnored private let savedResultsKey = "bandcamp-saved-results"
@@ -46,8 +52,12 @@ final class BandcampStore {
     @ObservationIgnored private var collectionTask: Task<Void, Never>?
     @ObservationIgnored private var searchTask: Task<Void, Never>?
     @ObservationIgnored private var feedTask: Task<Void, Never>?
+    @ObservationIgnored private var accountMutationTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var playbackGeneration = UUID()
     @ObservationIgnored private var discoveryGeneration = UUID()
+    @ObservationIgnored private var collectionGeneration = UUID()
+    @ObservationIgnored private var accountGeneration = UUID()
+    @ObservationIgnored private var updatingAccountItemIDs = Set<String>()
 
     init() {
         accountEmail = UserDefaults.standard.string(forKey: "bandcamp-account-email") ?? ""
@@ -79,6 +89,7 @@ final class BandcampStore {
         performCacheMaintenance(reportResult: false)
         if authSession != nil {
             Task { [weak self] in
+                await self?.restoreCachedAccount()
                 await self?.refreshAuthentication()
                 self?.loadCollection()
             }
@@ -92,6 +103,7 @@ final class BandcampStore {
         collectionTask?.cancel()
         searchTask?.cancel()
         feedTask?.cancel()
+        accountMutationTasks.values.forEach { $0.cancel() }
     }
 
     func saveSubscriptions(keywords: [String], artists: [String]) {
@@ -144,10 +156,14 @@ final class BandcampStore {
                 guard let self else { return }
                 authSession = session
                 try BandcampKeychain.writeSession(session)
+                accountGeneration = UUID()
+                collectionGeneration = UUID()
+                accountCache.remove()
+                clearAccountData()
                 isAuthenticated = true
                 authRequiresRetry = false
                 authStatusMessage = "Connected as \(email)"
-                loadCollection()
+                loadCollection(force: true)
             } catch {
                 self?.authError = error.localizedDescription
                 if let authError = error as? BandcampAuthError, authError.isLoginRejection {
@@ -162,15 +178,21 @@ final class BandcampStore {
     func signOut() {
         let session = authSession
         authSession = nil
+        accountGeneration = UUID()
+        collectionGeneration = UUID()
         isAuthenticated = false
         authError = nil
         authRequiresRetry = false
         authStatusMessage = "Disconnected"
-        ownedResults = []
+        clearAccountData()
         collectionError = nil
         isLoadingCollection = false
         collectionTask?.cancel()
         collectionTask = nil
+        accountMutationTasks.values.forEach { $0.cancel() }
+        accountMutationTasks = [:]
+        updatingAccountItemIDs = []
+        accountCache.remove()
         BandcampKeychain.removeSession()
         guard let session else { return }
         let authClient = self.authClient
@@ -197,24 +219,33 @@ final class BandcampStore {
             if let bandID = artist.bandID, result.bandID == bandID { return true }
             return result.artist.caseInsensitiveCompare(artist.title) == .orderedSame
         }
-        let ownedReleases = ownedResults.filter {
+        let accountReleases = (ownedResults + wishlistResults + accountNewReleases).filter {
             $0.artist.caseInsensitiveCompare(artist.title) == .orderedSame
         }
         return BandcampArtistPage(
             artist: artist,
             summary: summary,
-            releases: Array(deduplicated(ownedReleases + remoteReleases).prefix(40))
+            releases: Array(deduplicated(accountReleases + remoteReleases).prefix(40))
         )
     }
 
-    func loadCollection() {
+    func loadCollection(force: Bool = false) {
         guard isAuthenticated else {
-            ownedResults = []
+            clearAccountData()
             collectionError = nil
             isLoadingCollection = false
             return
         }
+        if !force,
+           let accountLastUpdated,
+           accountProfile != nil,
+           Date.now.timeIntervalSince(accountLastUpdated) < BandcampAccountSnapshot.refreshInterval {
+            return
+        }
         collectionTask?.cancel()
+        let generation = UUID()
+        collectionGeneration = generation
+        let sessionGeneration = accountGeneration
         isLoadingCollection = true
         collectionError = nil
         let authClient = self.authClient
@@ -222,32 +253,191 @@ final class BandcampStore {
             guard let self else { return }
             do {
                 let accessToken = try await validAccessToken()
-                var collected: [BandcampResult] = []
-                var offset: String?
-                var seenOffsets = Set<String>()
-
-                for _ in 0..<10 {
-                    try Task.checkCancellation()
-                    let page = try await authClient.collectionPage(
-                        accessToken: accessToken,
-                        offset: offset
-                    )
-                    collected.append(contentsOf: page.items)
-                    guard let nextOffset = page.nextOffset,
-                          seenOffsets.insert(nextOffset).inserted else { break }
-                    offset = nextOffset
+                async let overviewTask = Self.captureAccountFetch {
+                    try await authClient.accountOverview(accessToken: accessToken)
                 }
-
+                async let collectionPagesTask = Self.loadAllAccountPages(
+                    authClient: authClient,
+                    accessToken: accessToken,
+                    wishlist: false
+                )
+                async let wishlistPagesTask = Self.captureAccountFetch {
+                    try await Self.loadAllAccountPages(
+                        authClient: authClient,
+                        accessToken: accessToken,
+                        wishlist: true
+                    )
+                }
+                let collection = try await collectionPagesTask
+                let overviewResult = await overviewTask
+                let wishlistResult = await wishlistPagesTask
+                let followedResult: BandcampAccountFetchResult<[BandcampResult]>
+                if let overview = overviewResult.value {
+                    followedResult = await Self.captureAccountFetch {
+                        try await authClient.followedArtists(
+                            fanID: overview.profile.fanID,
+                            knownBandURLs: overview.knownBandURLs,
+                            accessToken: accessToken
+                        )
+                    }
+                } else {
+                    followedResult = BandcampAccountFetchResult(
+                        value: nil,
+                        errorDescription: "requires the fan profile"
+                    )
+                }
                 try Task.checkCancellation()
-                ownedResults = deduplicated(collected)
+                guard collectionGeneration == generation,
+                      accountGeneration == sessionGeneration,
+                      isAuthenticated else { return }
+                if let overview = overviewResult.value {
+                    accountProfile = overview.profile
+                    accountNewReleases = deduplicated(overview.newReleases)
+                }
+                ownedResults = deduplicated(collection)
+                if let wishlist = wishlistResult.value { wishlistResults = deduplicated(wishlist) }
+                if let followed = followedResult.value { followedArtists = deduplicated(followed) }
+                accountLastUpdated = .now
+                let sectionErrors = [
+                    overviewResult.errorDescription.map { "profile: \($0)" },
+                    wishlistResult.errorDescription.map { "wishlist: \($0)" },
+                    followedResult.errorDescription.map { "followed artists: \($0)" }
+                ].compactMap { $0 }
+                if !sectionErrors.isEmpty {
+                    collectionError = "Your collection refreshed, but some Bandcamp account sections did not: \(sectionErrors.joined(separator: "; ")). Cached data remains available."
+                }
+                persistAccountSnapshot()
             } catch is CancellationError {
                 return
             } catch {
+                guard collectionGeneration == generation,
+                      accountGeneration == sessionGeneration else { return }
                 collectionError = error.localizedDescription
             }
-            isLoadingCollection = false
-            collectionTask = nil
+            if collectionGeneration == generation {
+                isLoadingCollection = false
+                collectionTask = nil
+            }
         }
+    }
+
+    func isWishlisted(_ result: BandcampResult) -> Bool {
+        wishlistResults.contains { sameTralbum($0, result) }
+    }
+
+    func toggleWishlist(_ result: BandcampResult) {
+        guard isAuthenticated,
+              result.bandID != nil,
+              result.tralbumID != nil,
+              result.type == "a" || result.type == "t" else { return }
+        let key = wishlistMutationKey(result)
+        guard !updatingAccountItemIDs.contains(key) else { return }
+        let shouldAdd = !isWishlisted(result)
+        let removedItem = wishlistResults.first { sameTralbum($0, result) }
+        if shouldAdd {
+            wishlistResults.insert(wishlistResult(from: result), at: 0)
+        } else {
+            wishlistResults.removeAll { sameTralbum($0, result) }
+        }
+        updatingAccountItemIDs.insert(key)
+        collectionError = nil
+        persistAccountSnapshot()
+
+        let authClient = self.authClient
+        let generation = accountGeneration
+        let task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let accessToken = try await validAccessToken()
+                try await authClient.setWishlisted(
+                    shouldAdd,
+                    result: result,
+                    accessToken: accessToken
+                )
+                try Task.checkCancellation()
+                guard accountGeneration == generation else { return }
+                persistAccountSnapshot()
+            } catch is CancellationError {
+                return
+            } catch {
+                guard accountGeneration == generation else { return }
+                if shouldAdd {
+                    wishlistResults.removeAll { self.sameTralbum($0, result) }
+                } else if !isWishlisted(result) {
+                    wishlistResults.insert(removedItem ?? wishlistResult(from: result), at: 0)
+                }
+                collectionError = error.localizedDescription
+                persistAccountSnapshot()
+            }
+            if accountGeneration == generation {
+                updatingAccountItemIDs.remove(key)
+                accountMutationTasks[key] = nil
+            }
+        }
+        accountMutationTasks[key] = task
+    }
+
+    func isFollowing(_ artist: BandcampResult) -> Bool {
+        guard let bandID = artist.bandID else { return false }
+        return followedArtists.contains { $0.bandID == bandID }
+    }
+
+    func toggleFollowing(_ artist: BandcampResult) {
+        guard isAuthenticated, let bandID = artist.bandID else { return }
+        let key = "band-\(bandID)"
+        guard !updatingAccountItemIDs.contains(key) else { return }
+        let shouldFollow = !isFollowing(artist)
+        let removedArtist = followedArtists.first { $0.bandID == bandID }
+        if shouldFollow {
+            followedArtists.insert(followedArtist(from: artist), at: 0)
+        } else {
+            followedArtists.removeAll { $0.bandID == bandID }
+        }
+        updatingAccountItemIDs.insert(key)
+        collectionError = nil
+        persistAccountSnapshot()
+
+        let authClient = self.authClient
+        let generation = accountGeneration
+        let task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let accessToken = try await validAccessToken()
+                try await authClient.setFollowing(
+                    shouldFollow,
+                    bandID: bandID,
+                    accessToken: accessToken
+                )
+                try Task.checkCancellation()
+                guard accountGeneration == generation else { return }
+                persistAccountSnapshot()
+            } catch is CancellationError {
+                return
+            } catch {
+                guard accountGeneration == generation else { return }
+                if shouldFollow {
+                    followedArtists.removeAll { $0.bandID == bandID }
+                } else if !isFollowing(artist) {
+                    followedArtists.insert(removedArtist ?? followedArtist(from: artist), at: 0)
+                }
+                collectionError = error.localizedDescription
+                persistAccountSnapshot()
+            }
+            if accountGeneration == generation {
+                updatingAccountItemIDs.remove(key)
+                accountMutationTasks[key] = nil
+            }
+        }
+        accountMutationTasks[key] = task
+    }
+
+    func isUpdatingWishlist(_ result: BandcampResult) -> Bool {
+        updatingAccountItemIDs.contains(wishlistMutationKey(result))
+    }
+
+    func isUpdatingFollow(_ artist: BandcampResult) -> Bool {
+        guard let bandID = artist.bandID else { return false }
+        return updatingAccountItemIDs.contains("band-\(bandID)")
     }
 
     func search() {
@@ -527,6 +717,142 @@ final class BandcampStore {
         var components = URLComponents(string: "https://bandcamp.com/search")
         components?.queryItems = [URLQueryItem(name: "q", value: artist)]
         return components?.url ?? URL(string: "https://bandcamp.com")!
+    }
+
+    private nonisolated static func loadAllAccountPages(
+        authClient: BandcampAuthClient,
+        accessToken: String,
+        wishlist: Bool
+    ) async throws -> [BandcampResult] {
+        var items: [BandcampResult] = []
+        var offset: String?
+        var seenOffsets = Set<String>()
+        for _ in 0..<100 {
+            try Task.checkCancellation()
+            let page: BandcampCollectionPage
+            if wishlist {
+                page = try await authClient.wishlistPage(
+                    accessToken: accessToken,
+                    offset: offset
+                )
+            } else {
+                page = try await authClient.collectionPage(
+                    accessToken: accessToken,
+                    offset: offset
+                )
+            }
+            items.append(contentsOf: page.items)
+            guard let nextOffset = page.nextOffset,
+                  !nextOffset.isEmpty,
+                  seenOffsets.insert(nextOffset).inserted else { break }
+            offset = nextOffset
+        }
+        return items
+    }
+
+    private nonisolated static func captureAccountFetch<Value: Sendable>(
+        _ operation: @Sendable () async throws -> Value
+    ) async -> BandcampAccountFetchResult<Value> {
+        do {
+            return BandcampAccountFetchResult(
+                value: try await operation(),
+                errorDescription: nil
+            )
+        } catch is CancellationError {
+            return BandcampAccountFetchResult(value: nil, errorDescription: "cancelled")
+        } catch {
+            return BandcampAccountFetchResult(value: nil, errorDescription: error.localizedDescription)
+        }
+    }
+
+    private func restoreCachedAccount() async {
+        let identifier = accountIdentifier
+        let accountCache = self.accountCache
+        let snapshot = await Task.detached(priority: .utility) {
+            accountCache.load(accountIdentifier: identifier)
+        }.value
+        guard let snapshot,
+              isAuthenticated,
+              accountIdentifier.caseInsensitiveCompare(snapshot.accountIdentifier) == .orderedSame else {
+            return
+        }
+        accountProfile = snapshot.profile
+        ownedResults = snapshot.ownedResults
+        wishlistResults = snapshot.wishlistResults
+        followedArtists = snapshot.followedArtists
+        accountNewReleases = snapshot.newReleases
+        accountLastUpdated = snapshot.savedAt
+    }
+
+    private func persistAccountSnapshot() {
+        guard isAuthenticated else { return }
+        let snapshot = BandcampAccountSnapshot(
+            accountIdentifier: accountIdentifier,
+            profile: accountProfile,
+            ownedResults: ownedResults,
+            wishlistResults: wishlistResults,
+            followedArtists: followedArtists,
+            newReleases: accountNewReleases,
+            savedAt: accountLastUpdated ?? .now
+        )
+        let accountCache = self.accountCache
+        Task.detached(priority: .utility) {
+            try? accountCache.save(snapshot)
+        }
+    }
+
+    private var accountIdentifier: String {
+        let normalized = accountEmail.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized.isEmpty ? "connected-account" : normalized
+    }
+
+    private func clearAccountData() {
+        accountProfile = nil
+        ownedResults = []
+        wishlistResults = []
+        followedArtists = []
+        accountNewReleases = []
+        accountLastUpdated = nil
+    }
+
+    private func sameTralbum(_ lhs: BandcampResult, _ rhs: BandcampResult) -> Bool {
+        guard let lhsBandID = lhs.bandID,
+              let rhsBandID = rhs.bandID,
+              let lhsTralbumID = lhs.tralbumID,
+              let rhsTralbumID = rhs.tralbumID else { return lhs.id == rhs.id }
+        return lhsBandID == rhsBandID && lhsTralbumID == rhsTralbumID && lhs.type == rhs.type
+    }
+
+    private func wishlistMutationKey(_ result: BandcampResult) -> String {
+        guard let bandID = result.bandID, let tralbumID = result.tralbumID else {
+            return "wishlist-\(result.id)"
+        }
+        return "wishlist-\(result.type)-\(bandID)-\(tralbumID)"
+    }
+
+    private func wishlistResult(from result: BandcampResult) -> BandcampResult {
+        BandcampResult(
+            id: wishlistMutationKey(result),
+            title: result.title,
+            artist: result.artist,
+            url: result.openURL,
+            type: result.type,
+            bandID: result.bandID,
+            tralbumID: result.tralbumID,
+            artworkURL: result.artworkURL
+        )
+    }
+
+    private func followedArtist(from artist: BandcampResult) -> BandcampResult {
+        BandcampResult(
+            id: "followed-band-\(artist.bandID ?? 0)",
+            title: artist.title,
+            artist: artist.artist,
+            url: artist.openURL,
+            type: "b",
+            bandID: artist.bandID,
+            artworkURL: artist.artworkURL
+        )
     }
 
     private func refreshAuthentication() async {

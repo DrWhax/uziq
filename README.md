@@ -52,11 +52,17 @@ Uziq also publishes the current title, artist, album, artwork, duration, and pla
 - Persistent universal queue with Play Next, reordering, shuffle, repeat, and session restoration
 - macOS Now Playing and Control Center metadata, seeking, and transport controls
 - Privacy-conscious diagnostics report export with a small rotating event log
-- Bandcamp search, subscriptions, streaming, favorites, and expiring audio cache
+- Bandcamp search, subscriptions, streaming, fan collection, wishlist, followed-artist feed, and expiring caches
 - Spotify PKCE login, personal library, catalog search, and playback through Uziq's locally controlled librespot helper
 - Jellyfin account login, music-library browsing, artwork, playlists, search, queued playback, and expiring audio cache
 - Local / Bandcamp / Spotify / Jellyfin global-search scopes
 - Light/dark system appearance support
+
+## Bandcamp setup
+
+Public Bandcamp search and artist-enabled streams work without an account. Connecting a fan account under Uziq Settings → Bandcamp additionally shows the fan profile, complete purchased collection, wishlist, followed artists, and followed-artist releases; owned tracks use Bandcamp's authenticated high-quality stream when one is available. Follow and wishlist controls update the Bandcamp account directly.
+
+The password is used only for sign-in and is never stored. OAuth tokens remain in the macOS Keychain. Account metadata is cached on disk for six hours so opening Uziq does not re-fetch the full collection every time; the Refresh controls bypass that interval. These app-facing Bandcamp endpoints are private and therefore remain best-effort if Bandcamp changes them.
 
 ## Spotify setup
 

@@ -179,6 +179,28 @@ struct SettingsView: View {
                         Spacer()
                         Button("Disconnect", role: .destructive) { bandcamp.signOut() }
                     }
+                    if let profile = bandcamp.accountProfile {
+                        HStack(spacing: 14) {
+                            CachedRemoteArtwork(url: profile.artworkURL) {
+                                Image(systemName: "person.crop.circle.fill")
+                                    .font(.title2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(width: 38, height: 38)
+                            .clipShape(Circle())
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(profile.displayName)
+                                    .font(.callout.weight(.semibold))
+                                Text("@\(profile.username) · \(bandcamp.ownedResults.count) owned · \(bandcamp.wishlistResults.count) wishlisted · \(bandcamp.followedArtists.count) followed")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Refresh Account") { bandcamp.loadCollection(force: true) }
+                                .disabled(bandcamp.isLoadingCollection)
+                        }
+                    }
                 } else {
                     SecureField("Bandcamp password", text: $bandcampPassword)
                         .textContentType(.password)
