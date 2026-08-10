@@ -33,11 +33,13 @@ This creates a versioned DMG, ZIP, and SHA-256 checksum file in `dist/`. On the 
 
 - `Space` or `F8`: play/pause
 - `⌘←` / `⌘→`: previous/next queue item
-- `⇧⌘P`: open Now Playing and the universal queue
+- `⇧⌘R`: replay the current track
+- `⇧⌘P`: open Now Playing
+- `⇧⌘U`: open the Up Next inspector
 - `⌥⌘S`: toggle shuffle
 - `⌥⌘R`: cycle repeat off/all/one
 
-Use a track or result's context menu to choose **Play Next** or **Add to Queue**. The queue, selected item, playback position, shuffle/repeat mode, and volume are restored between launches.
+Use a track or result's context menu to choose **Play Next** or **Add to Queue**. The Up Next inspector can play, reorder, remove, or clear future items without stopping the current track. The dice button starts a shuffled queue from the local library, owned Bandcamp music, Spotify Liked Songs, or the connected Jellyfin library. The queue, selected item, playback position, shuffle/repeat mode, and volume are restored between launches.
 
 Uziq also publishes the current title, artist, album, artwork, duration, and playback state to macOS Now Playing. Control Center and compatible media keys can play, pause, seek, and move through the universal queue.
 

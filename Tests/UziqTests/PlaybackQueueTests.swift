@@ -144,4 +144,67 @@ final class PlaybackQueueTests: XCTestCase {
         XCTAssertEqual(restored.bandcampResult, result)
         XCTAssertEqual(restored.source, .bandcamp)
     }
+
+    @MainActor
+    func testUpNextContainsOnlyItemsAfterTheCurrentTrack() {
+        let sessionURL = temporarySessionURL("up-next-slice")
+        defer { try? FileManager.default.removeItem(at: sessionURL) }
+        let queue = PlaybackQueueStore(sessionURL: sessionURL)
+        let tracks = (1...4).map(spotifyTrack)
+
+        queue.replace(with: tracks[1], context: tracks)
+
+        XCTAssertEqual(queue.currentItem?.sourceID, "track-2")
+        XCTAssertEqual(queue.upcomingItems.map(\.sourceID), ["track-3", "track-4"])
+    }
+
+    @MainActor
+    func testClearingUpNextKeepsTheCurrentTrackAndHistory() {
+        let sessionURL = temporarySessionURL("clear-up-next")
+        defer { try? FileManager.default.removeItem(at: sessionURL) }
+        let queue = PlaybackQueueStore(sessionURL: sessionURL)
+        let tracks = (1...4).map(spotifyTrack)
+        queue.replace(with: tracks[1], context: tracks)
+
+        queue.clearUpcoming()
+
+        XCTAssertEqual(queue.items.map(\.sourceID), ["track-1", "track-2"])
+        XCTAssertEqual(queue.currentItem?.sourceID, "track-2")
+        XCTAssertTrue(queue.upcomingItems.isEmpty)
+    }
+
+    @MainActor
+    func testReorderingAndRemovingUpNextUseFutureRelativeOffsets() {
+        let sessionURL = temporarySessionURL("edit-up-next")
+        defer { try? FileManager.default.removeItem(at: sessionURL) }
+        let queue = PlaybackQueueStore(sessionURL: sessionURL)
+        let tracks = (1...4).map(spotifyTrack)
+        queue.replace(with: tracks[0], context: tracks)
+
+        queue.moveUpcoming(from: IndexSet(integer: 0), to: 3)
+        XCTAssertEqual(queue.items.map(\.sourceID), ["track-1", "track-3", "track-4", "track-2"])
+        XCTAssertEqual(queue.currentItem?.sourceID, "track-1")
+
+        queue.removeUpcoming(at: IndexSet([0, 2]))
+        XCTAssertEqual(queue.items.map(\.sourceID), ["track-1", "track-4"])
+        XCTAssertEqual(queue.upcomingItems.map(\.sourceID), ["track-4"])
+    }
+
+    private func spotifyTrack(_ number: Int) -> SpotifyCatalogItem {
+        SpotifyCatalogItem(
+            id: "track-\(number)",
+            name: "Track \(number)",
+            subtitle: "Artist",
+            uri: "spotify:track:track-\(number)",
+            kind: .track,
+            artworkURL: nil,
+            durationMS: 180_000,
+            itemCount: nil
+        )
+    }
+
+    private func temporarySessionURL(_ name: String) -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("uziq-\(name)-\(UUID().uuidString).json")
+    }
 }

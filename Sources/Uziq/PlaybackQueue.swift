@@ -1,6 +1,12 @@
 import Foundation
 import Observation
 
+private struct RandomPlaybackError: LocalizedError {
+    let message: String
+
+    var errorDescription: String? { message }
+}
+
 enum PlaybackSource: String, Codable, CaseIterable, Sendable {
     case local
     case bandcamp
@@ -163,6 +169,7 @@ final class PlaybackQueueStore {
     }
     private(set) var restoredPosition = 0.0
     private(set) var error: String?
+    private(set) var preparingRandomSource: PlaybackSource?
 
     @ObservationIgnored private weak var library: LibraryStore?
     @ObservationIgnored private weak var playback: PlaybackEngine?
@@ -179,6 +186,8 @@ final class PlaybackQueueStore {
     @ObservationIgnored private var isRestoringSession = false
     @ObservationIgnored private let sessionURLOverride: URL?
     @ObservationIgnored private var nowPlayingController: NowPlayingController?
+    @ObservationIgnored private var randomPlaybackTask: Task<Void, Never>?
+    @ObservationIgnored private var randomPlaybackGeneration = UUID()
 
     init(sessionURL: URL? = nil) {
         sessionURLOverride = sessionURL
@@ -206,11 +215,16 @@ final class PlaybackQueueStore {
         if let finishObserver { NotificationCenter.default.removeObserver(finishObserver) }
         if let toggleObserver { NotificationCenter.default.removeObserver(toggleObserver) }
         persistTimer?.invalidate()
+        randomPlaybackTask?.cancel()
     }
 
     var currentItem: UnifiedQueueItem? {
         guard let currentIndex, items.indices.contains(currentIndex) else { return nil }
         return items[currentIndex]
+    }
+
+    var upcomingItems: ArraySlice<UnifiedQueueItem> {
+        items[upcomingStartIndex...]
     }
 
     var hasPrevious: Bool { currentIndex.map { $0 > 0 } ?? false }
@@ -251,6 +265,7 @@ final class PlaybackQueueStore {
 
     func replace(with tracks: [Track], startingAt track: Track) {
         guard !tracks.isEmpty else { return }
+        cancelRandomPlayback()
         items = tracks.map(UnifiedQueueItem.init(local:))
         currentIndex = tracks.firstIndex(of: track) ?? 0
         restoredPosition = 0
@@ -258,6 +273,7 @@ final class PlaybackQueueStore {
     }
 
     func replace(with result: BandcampResult) {
+        cancelRandomPlayback()
         items = [UnifiedQueueItem(bandcamp: result)]
         currentIndex = 0
         restoredPosition = 0
@@ -267,6 +283,7 @@ final class PlaybackQueueStore {
     func replace(with item: SpotifyCatalogItem, context: [SpotifyCatalogItem]? = nil) {
         let playableContext = (context ?? [item]).filter { !$0.uri.isEmpty }
         guard !playableContext.isEmpty else { return }
+        cancelRandomPlayback()
         items = playableContext.map(UnifiedQueueItem.init(spotify:))
         currentIndex = playableContext.firstIndex(of: item) ?? 0
         restoredPosition = 0
@@ -276,6 +293,7 @@ final class PlaybackQueueStore {
     func replace(with item: JellyfinCatalogItem, context: [JellyfinCatalogItem]? = nil) {
         let playableContext = (context ?? [item]).filter { $0.kind == .track }
         guard !playableContext.isEmpty else { return }
+        cancelRandomPlayback()
         items = playableContext.map(UnifiedQueueItem.init(jellyfin:))
         currentIndex = playableContext.firstIndex(of: item) ?? 0
         restoredPosition = 0
@@ -284,9 +302,62 @@ final class PlaybackQueueStore {
 
     func play(_ item: UnifiedQueueItem) {
         guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
+        cancelRandomPlayback()
         currentIndex = index
         restoredPosition = 0
         dispatchCurrent()
+    }
+
+    func replay() {
+        guard currentItem != nil else { return }
+        restoredPosition = 0
+        if currentItem?.source == .spotify {
+            if spotify?.hasControllablePlayback == true {
+                spotify?.seek(to: 0)
+                spotify?.resume()
+            } else {
+                dispatchCurrent()
+            }
+        } else if playback?.currentTrack != nil {
+            playback?.seek(to: 0)
+            if playback?.isPlaying != true { playback?.toggle() }
+        } else {
+            dispatchCurrent()
+        }
+        persistSession()
+        updateNowPlaying(force: true)
+    }
+
+    func playRandom(from source: PlaybackSource) {
+        cancelRandomPlayback()
+        let generation = UUID()
+        randomPlaybackGeneration = generation
+        preparingRandomSource = source
+        error = nil
+        randomPlaybackTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let candidates = try await randomQueueItems(for: source)
+                try Task.checkCancellation()
+                guard randomPlaybackGeneration == generation else { return }
+                guard !candidates.isEmpty else {
+                    throw RandomPlaybackError(message: "No playable music is available in \(source.title).")
+                }
+                items = candidates
+                currentIndex = 0
+                restoredPosition = 0
+                preparingRandomSource = nil
+                randomPlaybackTask = nil
+                dispatchCurrent()
+            } catch is CancellationError {
+                return
+            } catch {
+                guard randomPlaybackGeneration == generation else { return }
+                self.error = error.localizedDescription
+                preparingRandomSource = nil
+                randomPlaybackTask = nil
+            }
+        }
     }
 
     func add(_ track: Track) { append(UnifiedQueueItem(local: track)) }
@@ -300,6 +371,7 @@ final class PlaybackQueueStore {
     func playNext(_ item: JellyfinCatalogItem) { insertNext(UnifiedQueueItem(jellyfin: item)) }
 
     func remove(at offsets: IndexSet) {
+        cancelRandomPlayback()
         let oldCurrentID = currentItem?.id
         let oldSource = currentItem?.source
         let removedCurrent = currentIndex.map(offsets.contains) ?? false
@@ -325,7 +397,23 @@ final class PlaybackQueueStore {
         updateNowPlaying(force: true)
     }
 
+    func remove(_ item: UnifiedQueueItem) {
+        guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
+        remove(at: IndexSet(integer: index))
+    }
+
+    func removeUpcoming(at offsets: IndexSet) {
+        let start = upcomingStartIndex
+        let mappedOffsets = IndexSet(offsets.compactMap { offset in
+            let index = start + offset
+            return items.indices.contains(index) ? index : nil
+        })
+        guard !mappedOffsets.isEmpty else { return }
+        remove(at: mappedOffsets)
+    }
+
     func move(from offsets: IndexSet, to destination: Int) {
+        cancelRandomPlayback()
         let moving = offsets.sorted().map { items[$0] }
         let currentID = currentItem?.id
         for index in offsets.sorted(by: >) { items.remove(at: index) }
@@ -337,7 +425,31 @@ final class PlaybackQueueStore {
         updateNowPlaying(force: true)
     }
 
+    func moveUpcoming(from offsets: IndexSet, to destination: Int) {
+        let start = upcomingStartIndex
+        let upcomingCount = items.count - start
+        let mappedOffsets = IndexSet(offsets.compactMap { offset in
+            guard offset >= 0, offset < upcomingCount else { return nil }
+            return start + offset
+        })
+        guard !mappedOffsets.isEmpty else { return }
+        move(
+            from: mappedOffsets,
+            to: start + min(upcomingCount, max(0, destination))
+        )
+    }
+
+    func clearUpcoming() {
+        cancelRandomPlayback()
+        let start = upcomingStartIndex
+        guard start < items.count else { return }
+        items.removeSubrange(start...)
+        persistSession()
+        updateNowPlaying(force: true)
+    }
+
     func clear() {
+        cancelRandomPlayback()
         let source = currentItem?.source
         items = []
         currentIndex = nil
@@ -493,18 +605,75 @@ final class PlaybackQueueStore {
     }
 
     private func append(_ item: UnifiedQueueItem) {
+        cancelRandomPlayback()
         items.append(item)
         if currentIndex == nil { currentIndex = 0 }
         persistSession()
         updateNowPlaying(force: true)
     }
 
+    private var upcomingStartIndex: Int {
+        guard let currentIndex, items.indices.contains(currentIndex) else { return 0 }
+        return min(items.count, currentIndex + 1)
+    }
+
     private func insertNext(_ item: UnifiedQueueItem) {
+        cancelRandomPlayback()
         let index = min(items.count, (currentIndex ?? -1) + 1)
         items.insert(item, at: index)
         if currentIndex == nil { currentIndex = 0 }
         persistSession()
         updateNowPlaying(force: true)
+    }
+
+    private func randomQueueItems(for source: PlaybackSource) async throws -> [UnifiedQueueItem] {
+        let limit = 100
+        switch source {
+        case .local:
+            guard let library else {
+                throw RandomPlaybackError(message: "The local library is not ready yet.")
+            }
+            let availableTracks = Array(
+                library.tracks
+                    .shuffled()
+                    .lazy
+                    .filter { FileManager.default.fileExists(atPath: $0.url.path) }
+                    .prefix(limit)
+            )
+            return availableTracks.map(UnifiedQueueItem.init(local:))
+        case .bandcamp:
+            guard let bandcamp else {
+                throw RandomPlaybackError(message: "Bandcamp is not ready yet.")
+            }
+            return bandcamp.ownedResults
+                .filter(\.isPlayable)
+                .shuffled()
+                .prefix(limit)
+                .map(UnifiedQueueItem.init(bandcamp:))
+        case .spotify:
+            guard let spotify else {
+                throw RandomPlaybackError(message: "Spotify is not ready yet.")
+            }
+            return spotify.likedSongs
+                .filter { $0.kind == .track && !$0.uri.isEmpty }
+                .shuffled()
+                .prefix(limit)
+                .map(UnifiedQueueItem.init(spotify:))
+        case .jellyfin:
+            guard let jellyfin else {
+                throw RandomPlaybackError(message: "Jellyfin is not ready yet.")
+            }
+            return try await jellyfin.randomTracks(limit: limit)
+                .shuffled()
+                .map(UnifiedQueueItem.init(jellyfin:))
+        }
+    }
+
+    private func cancelRandomPlayback() {
+        randomPlaybackGeneration = UUID()
+        randomPlaybackTask?.cancel()
+        randomPlaybackTask = nil
+        preparingRandomSource = nil
     }
 
     private func dispatchCurrent() {

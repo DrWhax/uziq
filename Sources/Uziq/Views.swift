@@ -11,6 +11,7 @@ struct ContentView: View {
     @Environment(JellyfinStore.self) private var jellyfin
     @Environment(PlaybackQueueStore.self) private var queue
     @State private var showingNowPlaying = false
+    @State private var showingQueue = false
     @State private var showingOnboarding = false
     @AppStorage("has-completed-onboarding") private var hasCompletedOnboarding = false
     @State private var globalSearchText = ""
@@ -27,7 +28,10 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Divider()
-            MiniPlayerView { showingNowPlaying = true }
+            MiniPlayerView(
+                onOpen: { showingNowPlaying = true },
+                onOpenQueue: { showingQueue.toggle() }
+            )
 
             if library.isScanning {
                 ScanProgressView()
@@ -43,7 +47,14 @@ struct ContentView: View {
             ToolbarItem(placement: .automatic) {
                 globalSearchField
             }
+            ToolbarItem(placement: .primaryAction) {
+                Button { showingQueue.toggle() } label: {
+                    Image(systemName: "list.bullet.rectangle")
+                }
+                .help(showingQueue ? "Hide Up Next" : "Show Up Next")
+            }
         }
+        .inspector(isPresented: $showingQueue) { queueInspector }
         .onChange(of: globalSearchText) { _, newValue in
             guard searchProvider == .local else { return }
             library.searchText = newValue
@@ -72,6 +83,9 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .uziqShowNowPlaying)) { _ in
             showingNowPlaying = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .uziqShowQueue)) { _ in
+            showingQueue = true
+        }
         .onReceive(NotificationCenter.default.publisher(for: .uziqShowOnboarding)) { _ in
             showingOnboarding = true
         }
@@ -82,18 +96,12 @@ struct ContentView: View {
         ) { result in
             if case .success(let urls) = result { library.importFolders(urls) }
         }
-        .alert("Something went wrong", isPresented: Binding(
-            get: { library.lastError != nil },
-            set: { if !$0 { library.clearError() } }
-        )) {
+        .alert("Something went wrong", isPresented: libraryErrorPresented) {
             Button("OK") { library.clearError() }
         } message: {
             Text(library.lastError ?? "Unknown error")
         }
-        .alert("Playback issue", isPresented: Binding(
-            get: { queue.error != nil },
-            set: { if !$0 { queue.clearError() } }
-        )) {
+        .alert("Playback issue", isPresented: playbackErrorPresented) {
             Button("OK") { queue.clearError() }
         } message: {
             Text(queue.error ?? "Unknown playback error")
@@ -122,6 +130,25 @@ struct ContentView: View {
             synchronizeSearchProvider()
             if !hasCompletedOnboarding { showingOnboarding = true }
         }
+    }
+
+    private var libraryErrorPresented: Binding<Bool> {
+        Binding(
+            get: { library.lastError != nil },
+            set: { if !$0 { library.clearError() } }
+        )
+    }
+
+    private var playbackErrorPresented: Binding<Bool> {
+        Binding(
+            get: { queue.error != nil },
+            set: { if !$0 { queue.clearError() } }
+        )
+    }
+
+    private var queueInspector: some View {
+        UpNextView(onClose: { showingQueue = false })
+            .inspectorColumnWidth(min: 300, ideal: 360, max: 480)
     }
 
     private var globalSearchField: some View {

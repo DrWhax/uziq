@@ -34,7 +34,15 @@ struct NowPlayingView: View {
                     .multilineTextAlignment(.center)
 
                     PlayerTimeline(height: 42)
-                    PlayerTransportControls()
+                    ZStack {
+                        PlayerTransportControls()
+                        HStack {
+                            ReplayTrackButton()
+                            Spacer()
+                            RandomPlaybackMenu()
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
 
                     HStack(spacing: 10) {
                         Image(systemName: "speaker.fill").foregroundStyle(.secondary)
@@ -67,7 +75,7 @@ struct NowPlayingView: View {
             .frame(minWidth: 520)
 
             Divider()
-            QueueSidebarView()
+            UpNextView()
                 .frame(width: 340)
         }
         .frame(minWidth: 880, minHeight: 680)
@@ -99,78 +107,6 @@ struct NowPlayingView: View {
     }
 }
 
-private struct QueueSidebarView: View {
-    @Environment(PlaybackQueueStore.self) private var queue
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Up Next").font(.title2.weight(.bold))
-                    Text("\(queue.items.count) items").font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Clear") { queue.clear() }.disabled(queue.items.isEmpty)
-            }
-            .padding(.horizontal, 18)
-            .padding(.top, 20)
-
-            if queue.items.isEmpty {
-                ContentUnavailableView("Queue is empty", systemImage: "text.line.first.and.arrowtriangle.forward")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                List {
-                    ForEach(Array(queue.items.enumerated()), id: \.element.id) { index, item in
-                        Button { queue.play(item) } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: item.source.systemImage)
-                                    .foregroundStyle(queue.currentItem?.id == item.id ? Color.accentColor : .secondary)
-                                    .frame(width: 22)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(item.title).lineLimit(1)
-                                    Text("\(item.artist) · \(item.source.title)")
-                                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                                }
-                                Spacer()
-                                if queue.currentItem?.id == item.id {
-                                    Image(systemName: queue.isPlaying ? "waveform" : "pause.fill")
-                                        .foregroundStyle(Color.accentColor)
-                                }
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            Button("Remove from Queue", role: .destructive) {
-                                queue.remove(at: IndexSet(integer: index))
-                            }
-                        }
-                    }
-                    .onDelete(perform: queue.remove)
-                    .onMove(perform: queue.move)
-                }
-                .listStyle(.inset)
-            }
-
-            HStack {
-                Button { queue.shuffleEnabled.toggle() } label: {
-                    Label("Shuffle", systemImage: "shuffle")
-                        .foregroundStyle(queue.shuffleEnabled ? Color.accentColor : .secondary)
-                }
-                .buttonStyle(.plain)
-                Spacer()
-                Button { queue.cycleRepeatMode() } label: {
-                    Label(queue.repeatMode.title, systemImage: queue.repeatMode.systemImage)
-                        .foregroundStyle(queue.repeatMode == .off ? .secondary : Color.accentColor)
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(18)
-        }
-        .background(.bar)
-    }
-}
-
 struct MiniPlayerView: View {
     @Environment(PlaybackQueueStore.self) private var queue
     @Environment(PlaybackEngine.self) private var playback
@@ -179,6 +115,7 @@ struct MiniPlayerView: View {
     @Environment(SpotifyStore.self) private var spotify
     @Environment(JellyfinStore.self) private var jellyfin
     let onOpen: () -> Void
+    let onOpenQueue: () -> Void
 
     var body: some View {
         VStack(spacing: 10) {
@@ -225,11 +162,13 @@ struct MiniPlayerView: View {
                             queue.currentItem == nil || queue.currentItem?.source == .spotify ||
                             (queue.currentItem?.source == .jellyfin && queue.currentItem?.jellyfinItem.map(jellyfin.isUpdatingFavorite) == true)
                         )
-                        Button(action: onOpen) {
+                        ReplayTrackButton()
+                        RandomPlaybackMenu()
+                        Button(action: onOpenQueue) {
                             Image(systemName: "list.bullet.rectangle")
                                 .frame(width: 34, height: 34).background(.quaternary, in: Circle())
                         }
-                        .buttonStyle(.plain).help("Open Now Playing and Queue")
+                        .buttonStyle(.plain).help("Show Up Next")
                     }
                 }
                 PlayerTransportControls()
@@ -581,4 +520,3 @@ private final class ArtworkImageCache: @unchecked Sendable {
         return "\(data.count)-\(hash)" as NSString
     }
 }
-

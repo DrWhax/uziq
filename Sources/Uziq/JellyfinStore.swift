@@ -331,6 +331,16 @@ final class JellyfinStore {
         )
     }
 
+    func randomTracks(limit: Int = 100) async throws -> [JellyfinCatalogItem] {
+        try await items(
+            kinds: [.audio],
+            parentID: musicLibraryID,
+            limit: max(1, limit),
+            sortBy: [.random],
+            sortOrder: [.ascending]
+        )
+    }
+
     func albums(for artist: JellyfinCatalogItem) async throws -> [JellyfinCatalogItem] {
         let albumArtistReleases = try await items(
             kinds: [.musicAlbum], parentID: musicLibraryID, limit: 500,
