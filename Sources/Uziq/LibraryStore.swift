@@ -34,8 +34,14 @@ final class LibraryStore {
     var lastError: String?
     var showingFolderImporter = false
     var folderRoots: [URL] = []
+    private(set) var folderWatchingEnabled = UserDefaults.standard.object(forKey: "folder-watching-enabled") == nil
+        || UserDefaults.standard.bool(forKey: "folder-watching-enabled")
+    private(set) var isFolderWatching = false
+    private(set) var isApplyingFolderChanges = false
+    private(set) var folderWatchMessage: String?
     var matchingTrackID: String?
     var playlists: [PlaylistSummary] = []
+    private(set) var smartPlaylists: [SmartPlaylistSummary] = []
     var favoriteTrackIDs: Set<String> = []
     private(set) var recentlyPlayedArtists: [RecentArtistPlay] = []
     private(set) var recentListeningHistory: [ListeningHistoryItem] = []
@@ -46,6 +52,7 @@ final class LibraryStore {
     @ObservationIgnored private let database = LibraryDatabase()
     @ObservationIgnored private let scanner = LibraryScanner()
     @ObservationIgnored private let bookmarks = BookmarkStore()
+    @ObservationIgnored private let folderWatcher = FolderWatcher()
     @ObservationIgnored private let matcher = MetadataMatcher(fingerprintProvider: FpcalcFingerprintProvider())
     @ObservationIgnored private let lyricsClient = LRCLIBClient()
     @ObservationIgnored private var artworkTask: Task<Void, Never>?
@@ -55,6 +62,11 @@ final class LibraryStore {
     @ObservationIgnored private var normalizedArtistArtwork: [String: Data] = [:]
     @ObservationIgnored private var playObserver: NSObjectProtocol?
     @ObservationIgnored private var lyricsLookupTasks: [String: Task<LocalLyricsLookupResult, Never>] = [:]
+    @ObservationIgnored private var folderWatchDebounceTask: Task<Void, Never>?
+    @ObservationIgnored private var folderReconciliationTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingChangedRoots = Set<URL>()
+    @ObservationIgnored private var folderWatchGeneration = UUID()
+    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
 
     init() {
         folderRoots = bookmarks.resolvedURLs()
@@ -71,10 +83,20 @@ final class LibraryStore {
                     if recorded {
                         await self.refresh()
                         await self.loadRecentlyPlayedArtists()
+                        await self.loadSmartPlaylists()
                     }
                 } catch {
                     self.lastError = error.localizedDescription
                 }
+            }
+        }
+        wakeObserver = NotificationCenter.default.addObserver(
+            forName: .uziqDidWake,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.configureFolderWatcher(reconcileOnStart: true)
             }
         }
         Task {
@@ -83,9 +105,11 @@ final class LibraryStore {
             await loadListeningHistory()
             await loadFavoriteTrackIDs()
             await loadPlaylists()
+            await loadSmartPlaylists()
             await loadArtistArtwork()
             await loadArtistProfiles()
             isInitialLoadComplete = true
+            configureFolderWatcher(reconcileOnStart: true)
             // Let SwiftUI finish installing its List/NSTableView hierarchy before
             // enrichment starts publishing progress changes beneath the table.
             try? await Task.sleep(for: .milliseconds(150))
@@ -95,9 +119,13 @@ final class LibraryStore {
     }
 
     deinit {
+        folderWatcher.stop()
+        folderWatchDebounceTask?.cancel()
+        folderReconciliationTask?.cancel()
         browseGroupingTask?.cancel()
         lyricsLookupTasks.values.forEach { $0.cancel() }
         if let playObserver { NotificationCenter.default.removeObserver(playObserver) }
+        if let wakeObserver { NotificationCenter.default.removeObserver(wakeObserver) }
     }
 
     func remoteLyrics(for track: Track) async -> LocalLyricsLookupResult {
@@ -146,6 +174,7 @@ final class LibraryStore {
         do {
             try await database.applyMetadataOverrides(trackIDs: trackIDs, changes: changes)
             await refresh()
+            await loadSmartPlaylists()
             return true
         } catch {
             lastError = error.localizedDescription
@@ -158,6 +187,7 @@ final class LibraryStore {
         do {
             try await database.clearMetadataOverrides(trackIDs: trackIDs)
             await refresh()
+            await loadSmartPlaylists()
             return true
         } catch {
             lastError = error.localizedDescription
@@ -209,12 +239,21 @@ final class LibraryStore {
             bookmarks.add(normalizedURL)
             if !folderRoots.contains(normalizedURL) { folderRoots.append(normalizedURL) }
         }
+        configureFolderWatcher(reconcileOnStart: false)
         scan()
     }
 
     func removeFolder(_ url: URL) {
         bookmarks.remove(url)
         folderRoots.removeAll { $0 == url }
+        configureFolderWatcher(reconcileOnStart: false)
+    }
+
+    func setFolderWatchingEnabled(_ enabled: Bool) {
+        guard folderWatchingEnabled != enabled else { return }
+        folderWatchingEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "folder-watching-enabled")
+        configureFolderWatcher(reconcileOnStart: enabled)
     }
 
     func scan() {
@@ -225,6 +264,14 @@ final class LibraryStore {
                 : "The existing index has no active folder access. Re-add its parent music folders in Settings."
             return
         }
+        // A manual rescan is authoritative for every root. Cancel any pending
+        // incremental pass so metadata is never read twice in parallel.
+        folderWatchDebounceTask?.cancel()
+        folderWatchDebounceTask = nil
+        folderReconciliationTask?.cancel()
+        folderReconciliationTask = nil
+        pendingChangedRoots.removeAll()
+        isApplyingFolderChanges = false
         isScanning = true
         lastError = nil
         scanMessage = "Starting library rescan…"
@@ -235,8 +282,10 @@ final class LibraryStore {
             }
             do {
                 try await database.upsertBatch(discovered)
-                try await database.removeMissingFiles()
+                let removedPaths = try await database.removeMissingFiles()
+                notifyPlaybackOfRemovedFiles(removedPaths)
                 await refresh()
+                await loadSmartPlaylists()
                 scanMessage = "Indexed \(discovered.count) audio files"
             } catch {
                 lastError = error.localizedDescription
@@ -244,6 +293,7 @@ final class LibraryStore {
             }
             scanProgress = nil
             isScanning = false
+            processPendingFolderChangesIfNeeded()
             if lastError == nil {
                 startArtworkEnrichment()
                 startArtistArtworkEnrichment()
@@ -253,6 +303,127 @@ final class LibraryStore {
                 if self?.isScanning == false { self?.scanMessage = nil }
             }
         }
+    }
+
+    private func configureFolderWatcher(reconcileOnStart: Bool) {
+        folderWatchGeneration = UUID()
+        folderWatchDebounceTask?.cancel()
+        folderWatchDebounceTask = nil
+        folderReconciliationTask?.cancel()
+        folderReconciliationTask = nil
+        pendingChangedRoots.removeAll()
+        folderWatcher.stop()
+        isFolderWatching = false
+        isApplyingFolderChanges = false
+
+        guard folderWatchingEnabled else {
+            folderWatchMessage = "Automatic folder updates are off"
+            return
+        }
+        let roots = FolderWatcher.minimalRoots(folderRoots)
+        guard !roots.isEmpty else {
+            folderWatchMessage = "Add a library folder to enable automatic updates"
+            return
+        }
+
+        let started = folderWatcher.start(roots: roots) { [weak self] changedRoots in
+            Task { @MainActor [weak self] in
+                self?.queueFolderChanges(changedRoots)
+            }
+        }
+        isFolderWatching = started
+        folderWatchMessage = started
+            ? "Watching \(roots.count) library folder\(roots.count == 1 ? "" : "s")"
+            : "Folder watching could not be started"
+        if started, reconcileOnStart {
+            queueFolderChanges(roots, delay: .milliseconds(500))
+        }
+    }
+
+    private func queueFolderChanges(_ roots: [URL], delay: Duration = .seconds(2)) {
+        let activeRoots = Set(FolderWatcher.minimalRoots(folderRoots))
+        pendingChangedRoots.formUnion(roots.filter { activeRoots.contains($0.standardizedFileURL) })
+        guard !pendingChangedRoots.isEmpty else { return }
+        folderWatchDebounceTask?.cancel()
+        folderWatchDebounceTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            self?.processPendingFolderChangesIfNeeded()
+        }
+    }
+
+    private func processPendingFolderChangesIfNeeded() {
+        guard folderWatchingEnabled, isFolderWatching, !pendingChangedRoots.isEmpty else { return }
+        guard !isScanning, folderReconciliationTask == nil else {
+            queueFolderChanges(Array(pendingChangedRoots))
+            return
+        }
+
+        let roots = pendingChangedRoots.sorted { $0.path < $1.path }
+        pendingChangedRoots.removeAll()
+        let generation = folderWatchGeneration
+        isApplyingFolderChanges = true
+        folderWatchMessage = "Checking library folder changes…"
+        folderReconciliationTask = Task { [weak self] in
+            guard let self else { return }
+            var changedCount = 0
+            var removedCount = 0
+            var inaccessibleRoots: [URL] = []
+            do {
+                for root in roots {
+                    try Task.checkCancellation()
+                    let indexed = try await database.indexedFiles(under: root)
+                    guard let reconciliation = await scanner.reconcile(root: root, indexedFiles: indexed) else {
+                        inaccessibleRoots.append(root)
+                        continue
+                    }
+                    try Task.checkCancellation()
+                    try await database.applyReconciliation(reconciliation)
+                    notifyPlaybackOfRemovedFiles(reconciliation.removedPaths)
+                    changedCount += reconciliation.changedMetadata.count
+                    removedCount += reconciliation.removedPaths.count
+                }
+                if changedCount > 0 || removedCount > 0 {
+                    await refresh()
+                    await loadSmartPlaylists()
+                }
+                guard folderWatchGeneration == generation, !Task.isCancelled else { return }
+                if changedCount > 0 || removedCount > 0 {
+                    await loadFavoriteTrackIDs()
+                    await loadPlaylists()
+                    startArtworkEnrichment()
+                    startArtistArtworkEnrichment()
+                    folderWatchMessage = "Library updated: \(changedCount) changed, \(removedCount) removed"
+                } else if let inaccessible = inaccessibleRoots.first {
+                    folderWatchMessage = "Waiting for \(inaccessible.lastPathComponent) to become available"
+                } else {
+                    let rootCount = FolderWatcher.minimalRoots(folderRoots).count
+                    folderWatchMessage = "Watching \(rootCount) library folder\(rootCount == 1 ? "" : "s")"
+                }
+            } catch is CancellationError {
+                if changedCount > 0 || removedCount > 0 {
+                    await refresh()
+                    await loadSmartPlaylists()
+                }
+                return
+            } catch {
+                guard folderWatchGeneration == generation else { return }
+                lastError = error.localizedDescription
+                folderWatchMessage = "Automatic library update failed"
+            }
+            guard folderWatchGeneration == generation else { return }
+            isApplyingFolderChanges = false
+            folderReconciliationTask = nil
+            processPendingFolderChangesIfNeeded()
+        }
+    }
+
+    private func notifyPlaybackOfRemovedFiles(_ paths: [String]) {
+        guard !paths.isEmpty else { return }
+        NotificationCenter.default.post(
+            name: .uziqLibraryFilesRemoved,
+            object: Set(paths)
+        )
     }
 
     private func startArtworkEnrichment() {
@@ -657,6 +828,7 @@ final class LibraryStore {
                 try await database.toggleFavorite(trackID: track.id)
                 await refresh()
                 await loadFavoriteTrackIDs()
+                await loadSmartPlaylists()
             } catch {
                 if favoriteTrackIDs.contains(track.id) {
                     favoriteTrackIDs.remove(track.id)
@@ -681,6 +853,74 @@ final class LibraryStore {
             playlists = try await database.fetchPlaylists()
         } catch {
             lastError = error.localizedDescription
+        }
+    }
+
+    func loadSmartPlaylists() async {
+        do {
+            smartPlaylists = try await database.fetchSmartPlaylists()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    func createSmartPlaylist(
+        name: String,
+        configuration: SmartPlaylistConfiguration
+    ) async -> SmartPlaylistSummary? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, configuration.isValid else { return nil }
+        do {
+            let playlist = try await database.createSmartPlaylist(
+                name: trimmed,
+                configuration: configuration
+            )
+            await loadSmartPlaylists()
+            return playlist
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    @discardableResult
+    func updateSmartPlaylist(
+        _ playlist: SmartPlaylistSummary,
+        name: String,
+        configuration: SmartPlaylistConfiguration
+    ) async -> SmartPlaylistSummary? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, configuration.isValid else { return nil }
+        do {
+            let updated = try await database.updateSmartPlaylist(
+                id: playlist.id,
+                name: trimmed,
+                configuration: configuration
+            )
+            await loadSmartPlaylists()
+            return updated
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    func deleteSmartPlaylist(_ playlist: SmartPlaylistSummary) async {
+        do {
+            try await database.deleteSmartPlaylist(id: playlist.id)
+            await loadSmartPlaylists()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func smartPlaylistTracks(_ playlist: SmartPlaylistSummary) async -> [Track] {
+        do {
+            return try await database.fetchSmartPlaylistTracks(configuration: playlist.configuration)
+        } catch {
+            lastError = error.localizedDescription
+            return []
         }
     }
 
@@ -760,6 +1000,7 @@ final class LibraryStore {
                 }
                 try await database.updateMatch(trackID: track.id, result: result)
                 await refresh()
+                await loadSmartPlaylists()
             } catch {
                 lastError = error.localizedDescription
             }

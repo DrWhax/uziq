@@ -836,18 +836,81 @@ struct PlaceholderLibraryView: View {
 struct PlaylistsLibraryView: View {
     @Environment(LibraryStore.self) private var library
     @State private var selectedPlaylist: PlaylistSummary?
+    @State private var selectedSmartPlaylist: SmartPlaylistSummary?
     @State private var showingNewPlaylist = false
+    @State private var showingNewSmartPlaylist = false
+    @State private var editingSmartPlaylist: SmartPlaylistSummary?
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     HStack(alignment: .lastTextBaseline) {
-                        LibraryHeading(title: "Playlists", subtitle: "\(library.playlists.count) playlists")
+                        LibraryHeading(
+                            title: "Playlists",
+                            subtitle: "\(library.smartPlaylists.count) smart · \(library.playlists.count) manual"
+                        )
+                        Button { showingNewSmartPlaylist = true } label: {
+                            Label("New Smart Playlist", systemImage: "wand.and.stars")
+                        }
+                        .buttonStyle(.borderedProminent)
                         Button { showingNewPlaylist = true } label: {
                             Label("New Playlist", systemImage: "plus")
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
+                    }
+                    if !library.smartPlaylists.isEmpty {
+                        Text("Smart Playlists")
+                            .font(.title3.weight(.semibold))
+                        LazyVStack(spacing: 0) {
+                            ForEach(library.smartPlaylists) { playlist in
+                                Button { selectedSmartPlaylist = playlist } label: {
+                                    HStack(spacing: 14) {
+                                        Image(systemName: "wand.and.stars")
+                                            .font(.title3)
+                                            .foregroundStyle(Color.accentColor)
+                                            .frame(width: 48, height: 48)
+                                            .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(playlist.name)
+                                                .font(.headline)
+                                            Text(SmartPlaylistDescription.summary(playlist))
+                                                .font(.subheadline)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                        Spacer()
+                                        Text("\(playlist.trackCount) tracks")
+                                            .font(.subheadline)
+                                            .foregroundStyle(.secondary)
+                                        Image(systemName: "chevron.right")
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                    .padding(.vertical, 10)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .contextMenu {
+                                    Button("Edit Smart Playlist…") { editingSmartPlaylist = playlist }
+                                    Button("Delete Smart Playlist", role: .destructive) {
+                                        Task { await library.deleteSmartPlaylist(playlist) }
+                                    }
+                                }
+                                Divider()
+                            }
+                        }
+                    }
+                    if !library.playlists.isEmpty {
+                        Text("Playlists")
+                            .font(.title3.weight(.semibold))
+                    }
+                    if library.smartPlaylists.isEmpty && library.playlists.isEmpty {
+                        ContentUnavailableView(
+                            "No Playlists Yet",
+                            systemImage: "music.note.list",
+                            description: Text("Create a regular playlist or a smart playlist that updates itself.")
+                        )
+                        .frame(minHeight: 240)
                     }
                     LazyVStack(spacing: 0) {
                         ForEach(library.playlists) { playlist in
@@ -884,11 +947,33 @@ struct PlaylistsLibraryView: View {
             .navigationDestination(item: $selectedPlaylist) { playlist in
                 PlaylistDetailView(playlist: playlist)
             }
+            .navigationDestination(item: $selectedSmartPlaylist) { playlist in
+                SmartPlaylistDetailView(playlist: playlist)
+            }
             .sheet(isPresented: $showingNewPlaylist) {
                 NewPlaylistSheet { name in library.createPlaylist(name: name) }
             }
+            .sheet(isPresented: $showingNewSmartPlaylist) {
+                SmartPlaylistEditorView { name, configuration in
+                    Task { await library.createSmartPlaylist(name: name, configuration: configuration) }
+                }
+            }
+            .sheet(item: $editingSmartPlaylist) { playlist in
+                SmartPlaylistEditorView(playlist: playlist) { name, configuration in
+                    Task {
+                        await library.updateSmartPlaylist(
+                            playlist,
+                            name: name,
+                            configuration: configuration
+                        )
+                    }
+                }
+            }
         }
-        .task { await library.loadPlaylists() }
+        .task {
+            await library.loadPlaylists()
+            await library.loadSmartPlaylists()
+        }
     }
 }
 

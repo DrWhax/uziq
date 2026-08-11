@@ -27,6 +27,21 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Library folders") {
+                Toggle("Watch folders for changes", isOn: Binding(
+                    get: { library.folderWatchingEnabled },
+                    set: { library.setFolderWatchingEnabled($0) }
+                ))
+                HStack(spacing: 8) {
+                    if library.isApplyingFolderChanges {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: library.isFolderWatching ? "eye.fill" : "eye.slash")
+                            .foregroundStyle(library.isFolderWatching ? Color.accentColor : .secondary)
+                    }
+                    Text(library.folderWatchMessage ?? "Automatic updates are idle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 if library.folderRoots.isEmpty {
                     if library.tracks.isEmpty {
                         Text("No folders added")
@@ -55,6 +70,36 @@ struct SettingsView: View {
                     Button("Rescan All") { library.scan() }
                         .disabled(library.folderRoots.isEmpty)
                 }
+            }
+            Section("Audio output") {
+                Picker("Output device", selection: Binding(
+                    get: { playback.selectedOutputDeviceUID },
+                    set: { playback.selectAudioOutput($0) }
+                )) {
+                    Text("System Default — \(playback.systemDefaultOutputName)")
+                        .tag(AudioOutputSelection.systemDefaultUID)
+                    Divider()
+                    ForEach(playback.outputDevices) { device in
+                        Text(device.name + (device.isSystemDefault ? " (Default)" : ""))
+                            .tag(device.uid)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                HStack(spacing: 8) {
+                    Label(playback.activeOutputDeviceName, systemImage: "speaker.wave.2.fill")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Refresh") { playback.refreshAudioOutputs() }
+                }
+                if let message = playback.audioOutputMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Text("Applies to local, Bandcamp, and Jellyfin audio. Spotify’s isolated librespot engine follows the output selected in macOS, preserving its stable, crackle-free playback path.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section("Equalizer") {
                 Toggle("Enable equalizer", isOn: Binding(
@@ -93,7 +138,10 @@ struct SettingsView: View {
                     }
                 }
                 .disabled(!playback.equalizerEnabled)
-                Text("Ten-band equalization is applied to local files and cached Bandcamp and Jellyfin playback. Spotify uses librespot’s native CoreAudio output for stable streaming.")
+                Text("Ten-band equalization is applied to local files and cached Bandcamp and Jellyfin playback. Spotify uses librespot’s isolated CoreAudio output for stable streaming.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Positive boosts are automatically balanced with equal preamp headroom to prevent clipping and unintended volume increases.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

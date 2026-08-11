@@ -30,6 +30,7 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedLibrary("sqlite3"),
+                .linkedFramework("CoreAudio"),
                 .linkedFramework("MediaPlayer")
             ]
         ),

@@ -252,6 +252,179 @@ struct PlaylistSummary: Identifiable, Hashable, Sendable {
     let createdAt: Date
 }
 
+enum SmartPlaylistMatchMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    case all
+    case any
+
+    var id: String { rawValue }
+    var title: String { self == .all ? "all" : "any" }
+}
+
+enum SmartPlaylistRuleField: String, Codable, CaseIterable, Identifiable, Sendable {
+    case title
+    case artist
+    case albumArtist
+    case album
+    case genre
+    case year
+    case codec
+    case favorite
+    case playCount
+    case dateAdded
+    case lastPlayed
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .title: "Title"
+        case .artist: "Artist"
+        case .albumArtist: "Album Artist"
+        case .album: "Album"
+        case .genre: "Genre"
+        case .year: "Year"
+        case .codec: "Format"
+        case .favorite: "Favorite"
+        case .playCount: "Play Count"
+        case .dateAdded: "Date Added"
+        case .lastPlayed: "Last Played"
+        }
+    }
+
+    var allowedOperators: [SmartPlaylistRuleOperator] {
+        switch self {
+        case .title, .artist, .albumArtist, .album, .genre, .codec:
+            [.contains, .doesNotContain, .equals, .notEquals]
+        case .year, .playCount:
+            [.equals, .notEquals, .greaterThan, .lessThan]
+        case .favorite:
+            [.isTrue, .isFalse]
+        case .dateAdded, .lastPlayed:
+            [.inLastDays, .notInLastDays]
+        }
+    }
+
+    var defaultValue: String {
+        switch self {
+        case .playCount: "5"
+        case .dateAdded, .lastPlayed: "30"
+        default: ""
+        }
+    }
+}
+
+enum SmartPlaylistRuleOperator: String, Codable, Identifiable, Sendable {
+    case contains
+    case doesNotContain
+    case equals
+    case notEquals
+    case greaterThan
+    case lessThan
+    case inLastDays
+    case notInLastDays
+    case isTrue
+    case isFalse
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .contains: "contains"
+        case .doesNotContain: "does not contain"
+        case .equals: "is"
+        case .notEquals: "is not"
+        case .greaterThan: "is greater than"
+        case .lessThan: "is less than"
+        case .inLastDays: "is in the last"
+        case .notInLastDays: "is not in the last"
+        case .isTrue: "is favorited"
+        case .isFalse: "is not favorited"
+        }
+    }
+
+    var requiresValue: Bool {
+        self != .isTrue && self != .isFalse
+    }
+}
+
+struct SmartPlaylistRule: Identifiable, Codable, Hashable, Sendable {
+    var id: UUID
+    var field: SmartPlaylistRuleField
+    var comparison: SmartPlaylistRuleOperator
+    var value: String
+
+    init(
+        id: UUID = UUID(),
+        field: SmartPlaylistRuleField = .artist,
+        comparison: SmartPlaylistRuleOperator = .contains,
+        value: String = ""
+    ) {
+        self.id = id
+        self.field = field
+        self.comparison = comparison
+        self.value = value
+    }
+
+    var isValid: Bool {
+        guard field.allowedOperators.contains(comparison) else { return false }
+        if !comparison.requiresValue { return true }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        switch field {
+        case .year, .playCount, .dateAdded, .lastPlayed:
+            guard let number = Double(trimmed), number.isFinite else { return false }
+            return field == .year ? number > 0 : number >= 0
+        default:
+            return true
+        }
+    }
+}
+
+enum SmartPlaylistSortOrder: String, Codable, CaseIterable, Identifiable, Sendable {
+    case title
+    case artist
+    case album
+    case recentlyAdded
+    case recentlyPlayed
+    case mostPlayed
+    case leastPlayed
+    case random
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .title: "Title"
+        case .artist: "Artist"
+        case .album: "Album"
+        case .recentlyAdded: "Recently Added"
+        case .recentlyPlayed: "Recently Played"
+        case .mostPlayed: "Most Played"
+        case .leastPlayed: "Least Played"
+        case .random: "Random"
+        }
+    }
+}
+
+struct SmartPlaylistConfiguration: Codable, Hashable, Sendable {
+    var matchMode: SmartPlaylistMatchMode = .all
+    var rules: [SmartPlaylistRule] = []
+    var sortOrder: SmartPlaylistSortOrder = .title
+    var limit: Int? = 100
+
+    var isValid: Bool {
+        rules.allSatisfy(\.isValid) && limit.map { (1...500).contains($0) } != false
+    }
+}
+
+struct SmartPlaylistSummary: Identifiable, Hashable, Sendable {
+    let id: String
+    let name: String
+    let configuration: SmartPlaylistConfiguration
+    let trackCount: Int
+    let createdAt: Date
+}
+
 struct AlbumGroup: Identifiable, Hashable, Sendable {
     let id: String
     let title: String

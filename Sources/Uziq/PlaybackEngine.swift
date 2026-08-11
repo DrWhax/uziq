@@ -1,4 +1,6 @@
 import AVFoundation
+import AudioToolbox
+import CoreAudio
 import Foundation
 import Observation
 
@@ -39,6 +41,7 @@ enum EqualizerPreset: String, CaseIterable, Identifiable {
 @Observable
 final class PlaybackEngine {
     static let equalizerFrequencies: [Float] = [32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
+    private static let audioOutputDefaultsKey = "audio-output-device-uid"
 
     var currentTrack: Track?
     var isPlaying = false
@@ -51,6 +54,10 @@ final class PlaybackEngine {
         }
     }
     var queue: [Track] = []
+    private(set) var outputDevices: [AudioOutputDevice] = []
+    private(set) var selectedOutputDeviceUID = AudioOutputSelection.systemDefaultUID
+    private(set) var activeOutputDeviceName = "System Default"
+    private(set) var audioOutputMessage: String?
     private(set) var isSpotifyPCMActive = false
     private(set) var spotifyReceivedByteCount = 0
     private(set) var spotifyAudioError: String?
@@ -98,8 +105,13 @@ final class PlaybackEngine {
     @ObservationIgnored private var progressTimer: Timer?
     @ObservationIgnored private var toggleObserver: NSObjectProtocol?
     @ObservationIgnored private var engineConfigurationObserver: NSObjectProtocol?
+    @ObservationIgnored private var audioOutputMonitor: AudioOutputDeviceMonitor?
+    @ObservationIgnored private var defaultOutputDeviceID: AudioDeviceID?
+    @ObservationIgnored private var activeOutputDeviceID: AudioDeviceID?
+    @ObservationIgnored private var ignoringConfigurationChangesUntil = Date.distantPast
     @ObservationIgnored private var sleepObserver: NSObjectProtocol?
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
+    @ObservationIgnored private var removedFilesObserver: NSObjectProtocol?
     @ObservationIgnored private var recoveryTask: Task<Void, Never>?
     @ObservationIgnored private var isSystemSleeping = false
     @ObservationIgnored private var resumeAfterWake = false
@@ -142,6 +154,8 @@ final class PlaybackEngine {
             ? 0
             : min(12, max(-12, defaults.float(forKey: "normalization-preamp-db")))
         crossfadeDuration = min(12, max(0, defaults.double(forKey: "crossfade-duration")))
+        selectedOutputDeviceUID = defaults.string(forKey: Self.audioOutputDefaultsKey)
+            ?? AudioOutputSelection.systemDefaultUID
 
         audioEngine.attach(primaryPlayerNode)
         audioEngine.attach(transitionPlayerNode)
@@ -163,7 +177,29 @@ final class PlaybackEngine {
         spotifyPlayerNode.volume = volume
         configureEqualizerBands()
         applyEqualizerSettings()
-        try? startAudioEngine()
+        refreshAudioOutputSnapshot()
+        if AudioOutputSelection.resolveDeviceID(
+            selectedUID: selectedOutputDeviceUID,
+            devices: outputDevices,
+            defaultDeviceID: defaultOutputDeviceID
+        ) == nil {
+            selectedOutputDeviceUID = AudioOutputSelection.systemDefaultUID
+            defaults.set(selectedOutputDeviceUID, forKey: Self.audioOutputDefaultsKey)
+        }
+        if let deviceID = resolvedOutputDeviceID() {
+            do {
+                try setAudioEngineOutput(deviceID)
+                activeOutputDeviceID = deviceID
+                updateActiveOutputName()
+            } catch {
+                audioOutputMessage = error.localizedDescription
+            }
+        }
+        do {
+            try startAudioEngine()
+        } catch {
+            audioOutputMessage = "Could not start audio output: \(error.localizedDescription)"
+        }
 
         // Track transitions are driven by AVAudioPlayerNode's completion callback.
         // A one-second poll is sufficient for prefetching and internal position
@@ -199,6 +235,25 @@ final class PlaybackEngine {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in self?.systemDidWake() }
         }
+        removedFilesObserver = NotificationCenter.default.addObserver(
+            forName: .uziqLibraryFilesRemoved,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let removedPaths = notification.object as? Set<String> else { return }
+            Task { @MainActor [weak self] in
+                guard let self,
+                      !self.isSpotifyPCMActive,
+                      let currentPath = self.currentTrack?.url.path,
+                      removedPaths.contains(currentPath) else { return }
+                self.next()
+            }
+        }
+        let audioOutputMonitor = AudioOutputDeviceMonitor { [weak self] in
+            Task { @MainActor [weak self] in self?.audioOutputDevicesChanged() }
+        }
+        self.audioOutputMonitor = audioOutputMonitor
+        audioOutputMonitor.start()
     }
 
     deinit {
@@ -210,10 +265,50 @@ final class PlaybackEngine {
         if let engineConfigurationObserver { NotificationCenter.default.removeObserver(engineConfigurationObserver) }
         if let sleepObserver { NotificationCenter.default.removeObserver(sleepObserver) }
         if let wakeObserver { NotificationCenter.default.removeObserver(wakeObserver) }
+        if let removedFilesObserver { NotificationCenter.default.removeObserver(removedFilesObserver) }
         primaryPlayerNode.stop()
         transitionPlayerNode.stop()
         spotifyPlayerNode.stop()
         audioEngine.stop()
+    }
+
+    var systemDefaultOutputName: String {
+        outputDevices.first(where: { $0.deviceID == defaultOutputDeviceID })?.name ?? "Unavailable"
+    }
+
+    func selectAudioOutput(_ uid: String) {
+        refreshAudioOutputSnapshot()
+        guard let deviceID = AudioOutputSelection.resolveDeviceID(
+            selectedUID: uid,
+            devices: outputDevices,
+            defaultDeviceID: defaultOutputDeviceID
+        ) else {
+            audioOutputMessage = "That audio output is no longer available."
+            return
+        }
+        guard deviceID != activeOutputDeviceID else {
+            selectedOutputDeviceUID = uid
+            UserDefaults.standard.set(uid, forKey: Self.audioOutputDefaultsKey)
+            updateActiveOutputName()
+            audioOutputMessage = nil
+            return
+        }
+
+        do {
+            try switchAudioEngineOutput(to: deviceID, reason: "output selection")
+            selectedOutputDeviceUID = uid
+            UserDefaults.standard.set(uid, forKey: Self.audioOutputDefaultsKey)
+            activeOutputDeviceID = deviceID
+            updateActiveOutputName()
+            audioOutputMessage = nil
+        } catch {
+            audioOutputMessage = "Could not switch audio output: \(error.localizedDescription)"
+            DiagnosticsLog.shared.record("audio", audioOutputMessage ?? "Audio output switch failed")
+        }
+    }
+
+    func refreshAudioOutputs() {
+        audioOutputDevicesChanged()
     }
 
     func play(_ track: Track, in tracks: [Track]? = nil) {
@@ -713,9 +808,18 @@ final class PlaybackEngine {
 
     private func applyEqualizerSettings() {
         equalizer.bypass = !equalizerEnabled
+        equalizer.globalGain = Self.equalizerHeadroomDB(
+            enabled: equalizerEnabled,
+            gains: equalizerGains
+        )
         for (index, gain) in equalizerGains.enumerated() where equalizer.bands.indices.contains(index) {
             equalizer.bands[index].gain = gain
         }
+    }
+
+    nonisolated static func equalizerHeadroomDB(enabled: Bool, gains: [Float]) -> Float {
+        guard enabled else { return 0 }
+        return -max(0, gains.max() ?? 0)
     }
 
     private func applyLocalVolume() {
@@ -741,6 +845,108 @@ final class PlaybackEngine {
         guard !audioEngine.isRunning else { return }
         audioEngine.prepare()
         try audioEngine.start()
+    }
+
+    private func refreshAudioOutputSnapshot() {
+        let snapshot = AudioOutputDevices.snapshot()
+        outputDevices = snapshot.devices
+        defaultOutputDeviceID = snapshot.defaultDeviceID
+    }
+
+    private func resolvedOutputDeviceID() -> AudioDeviceID? {
+        AudioOutputSelection.resolveDeviceID(
+            selectedUID: selectedOutputDeviceUID,
+            devices: outputDevices,
+            defaultDeviceID: defaultOutputDeviceID
+        )
+    }
+
+    private func updateActiveOutputName() {
+        guard let activeOutputDeviceID else {
+            activeOutputDeviceName = "Unavailable"
+            return
+        }
+        activeOutputDeviceName = outputDevices.first(where: {
+            $0.deviceID == activeOutputDeviceID
+        })?.name ?? "Audio Output"
+    }
+
+    private func setAudioEngineOutput(_ deviceID: AudioDeviceID) throws {
+        guard let audioUnit = audioEngine.outputNode.audioUnit else {
+            throw AudioOutputError.outputUnitUnavailable
+        }
+        try AudioOutputDevices.select(deviceID, for: audioUnit)
+    }
+
+    private func switchAudioEngineOutput(to deviceID: AudioDeviceID, reason: String) throws {
+        let previousDeviceID = activeOutputDeviceID
+        let localPosition = currentTime
+        let shouldResumeLocal = currentTrack != nil && (isPlaying || playerNode.isPlaying)
+        let hasLocalTrack = currentTrack != nil && !isSpotifyPCMActive
+
+        recoveryTask?.cancel()
+        finishCrossfadeImmediately()
+        ignoringConfigurationChangesUntil = .now.addingTimeInterval(1.5)
+        scheduleGeneration += 1
+        primaryPlayerNode.stop()
+        transitionPlayerNode.stop()
+        if isSpotifyPCMActive { resetSpotifyPCMQueue() }
+        audioEngine.stop()
+
+        do {
+            try setAudioEngineOutput(deviceID)
+            try startAudioEngine()
+            if hasLocalTrack {
+                recoverLocalPlayback(
+                    at: localPosition,
+                    shouldPlay: shouldResumeLocal,
+                    reason: reason
+                )
+            }
+            DiagnosticsLog.shared.record("audio", "Switched audio output for \(reason)")
+        } catch {
+            if let previousDeviceID { try? setAudioEngineOutput(previousDeviceID) }
+            try? startAudioEngine()
+            if hasLocalTrack {
+                recoverLocalPlayback(
+                    at: localPosition,
+                    shouldPlay: shouldResumeLocal,
+                    reason: "failed output switch"
+                )
+            }
+            throw error
+        }
+    }
+
+    private func audioOutputDevicesChanged() {
+        refreshAudioOutputSnapshot()
+
+        if selectedOutputDeviceUID != AudioOutputSelection.systemDefaultUID,
+           resolvedOutputDeviceID() == nil {
+            selectedOutputDeviceUID = AudioOutputSelection.systemDefaultUID
+            UserDefaults.standard.set(selectedOutputDeviceUID, forKey: Self.audioOutputDefaultsKey)
+            audioOutputMessage = "The selected device disconnected. Uziq switched to System Default."
+        }
+
+        guard let desiredDeviceID = resolvedOutputDeviceID() else {
+            activeOutputDeviceID = nil
+            activeOutputDeviceName = "Unavailable"
+            audioOutputMessage = "No audio output device is currently available."
+            return
+        }
+        guard desiredDeviceID != activeOutputDeviceID else {
+            updateActiveOutputName()
+            return
+        }
+
+        do {
+            try switchAudioEngineOutput(to: desiredDeviceID, reason: "device configuration change")
+            activeOutputDeviceID = desiredDeviceID
+            updateActiveOutputName()
+        } catch {
+            audioOutputMessage = "Could not activate \(systemDefaultOutputName): \(error.localizedDescription)"
+            DiagnosticsLog.shared.record("audio", audioOutputMessage ?? "Audio device recovery failed")
+        }
     }
 
     private func systemWillSleep() {
@@ -781,7 +987,8 @@ final class PlaybackEngine {
 
     private func audioEngineConfigurationChanged() {
         finishCrossfadeImmediately()
-        guard !isSystemSleeping,
+        guard Date.now >= ignoringConfigurationChangesUntil,
+              !isSystemSleeping,
               let currentTrack,
               !isSpotifyPCMActive else { return }
         let trackID = currentTrack.id

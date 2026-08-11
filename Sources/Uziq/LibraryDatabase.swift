@@ -12,7 +12,7 @@ actor LibraryDatabase {
     private let databaseURL: URL
     private let initializationError: String?
 
-    nonisolated static let currentSchemaVersion = 9
+    nonisolated static let currentSchemaVersion = 10
 
     private nonisolated static let effectiveTrackColumns = """
         t.id, t.path, t.file_name,
@@ -86,6 +86,39 @@ actor LibraryDatabase {
         try withTransaction {
             for metadata in metadataItems {
                 try upsertWithoutTransaction(metadata)
+            }
+        }
+    }
+
+    func indexedFiles(under root: URL) throws -> [String: IndexedAudioFile] {
+        let statement = try prepare("SELECT path, modified_at, file_size FROM tracks")
+        defer { sqlite3_finalize(statement) }
+        var result: [String: IndexedAudioFile] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let pathValue = sqlite3_column_text(statement, 0) else { continue }
+            let path = String(cString: pathValue)
+            guard LibraryPath.contains(URL(fileURLWithPath: path), in: root) else { continue }
+            result[path] = IndexedAudioFile(
+                modifiedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 1)),
+                fileSize: sqlite3_column_int64(statement, 2)
+            )
+        }
+        return result
+    }
+
+    func applyReconciliation(_ reconciliation: LibraryReconciliation) throws {
+        guard reconciliation.hasChanges else { return }
+        try withTransaction {
+            for metadata in reconciliation.changedMetadata {
+                try upsertWithoutTransaction(metadata)
+            }
+            for path in reconciliation.removedPaths {
+                guard let id = try optionalScalarString(
+                    "SELECT id FROM tracks WHERE path = ?",
+                    bindings: [path]
+                ) else { continue }
+                try execute("DELETE FROM tracks_fts WHERE track_id = ?", bindings: [id])
+                try execute("DELETE FROM tracks WHERE id = ?", bindings: [id])
             }
         }
     }
@@ -669,21 +702,145 @@ actor LibraryDatabase {
         try step(statement)
     }
 
-    func removeMissingFiles() throws {
+    func fetchSmartPlaylists() throws -> [SmartPlaylistSummary] {
+        let statement = try prepare("""
+            SELECT id, name, configuration, created_at
+            FROM smart_playlists
+            ORDER BY created_at DESC
+            """)
+        defer { sqlite3_finalize(statement) }
+        var playlists: [SmartPlaylistSummary] = []
+        let decoder = JSONDecoder()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let idValue = sqlite3_column_text(statement, 0),
+                  let nameValue = sqlite3_column_text(statement, 1),
+                  let configurationData = data(statement, column: 2),
+                  let configuration = try? decoder.decode(SmartPlaylistConfiguration.self, from: configurationData),
+                  configuration.isValid else { continue }
+            playlists.append(SmartPlaylistSummary(
+                id: String(cString: idValue),
+                name: String(cString: nameValue),
+                configuration: configuration,
+                trackCount: try smartPlaylistTrackCount(configuration: configuration),
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
+            ))
+        }
+        return playlists
+    }
+
+    func createSmartPlaylist(
+        name: String,
+        configuration: SmartPlaylistConfiguration
+    ) throws -> SmartPlaylistSummary {
+        guard configuration.isValid else {
+            throw UziqError.database("The smart playlist contains an invalid rule")
+        }
+        let trackCount = try smartPlaylistTrackCount(configuration: configuration)
+        let id = UUID().uuidString
+        let encoded = try JSONEncoder().encode(configuration)
+        let statement = try prepare("""
+            INSERT INTO smart_playlists(id, name, configuration, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(statement) }
+        let now = Date.now
+        bind(id, to: statement, index: 1)
+        bind(name, to: statement, index: 2)
+        bind(encoded, to: statement, index: 3)
+        bind(now.timeIntervalSince1970, to: statement, index: 4)
+        bind(now.timeIntervalSince1970, to: statement, index: 5)
+        try step(statement)
+        return SmartPlaylistSummary(
+            id: id,
+            name: name,
+            configuration: configuration,
+            trackCount: trackCount,
+            createdAt: now
+        )
+    }
+
+    func updateSmartPlaylist(
+        id: String,
+        name: String,
+        configuration: SmartPlaylistConfiguration
+    ) throws -> SmartPlaylistSummary {
+        guard configuration.isValid else {
+            throw UziqError.database("The smart playlist contains an invalid rule")
+        }
+        let createdAt = try smartPlaylistCreatedAt(id: id)
+        let trackCount = try smartPlaylistTrackCount(configuration: configuration)
+        let statement = try prepare("""
+            UPDATE smart_playlists
+            SET name = ?, configuration = ?, updated_at = ?
+            WHERE id = ?
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(name, to: statement, index: 1)
+        bind(try JSONEncoder().encode(configuration), to: statement, index: 2)
+        bind(Date.now.timeIntervalSince1970, to: statement, index: 3)
+        bind(id, to: statement, index: 4)
+        try step(statement)
+        return SmartPlaylistSummary(
+            id: id,
+            name: name,
+            configuration: configuration,
+            trackCount: trackCount,
+            createdAt: createdAt
+        )
+    }
+
+    func deleteSmartPlaylist(id: String) throws {
+        try execute("DELETE FROM smart_playlists WHERE id = ?", bindings: [id])
+    }
+
+    func fetchSmartPlaylistTracks(configuration: SmartPlaylistConfiguration) throws -> [Track] {
+        guard configuration.isValid else {
+            throw UziqError.database("The smart playlist contains an invalid rule")
+        }
+        let query = try SmartPlaylistSQLQuery.build(configuration: configuration, includeOrder: true)
+        let statement = try prepare("""
+            SELECT \(Self.effectiveTrackColumns), COUNT(ph.id) AS play_count
+            FROM tracks t
+            LEFT JOIN track_metadata_overrides o ON o.track_id = t.id
+            LEFT JOIN play_history ph ON ph.track_id = t.id
+            GROUP BY t.id
+            \(query.havingClause)
+            \(query.orderClause)
+            LIMIT ?
+            """)
+        defer { sqlite3_finalize(statement) }
+        let bindings = query.bindings + [String(configuration.limit ?? -1)]
+        for (index, value) in bindings.enumerated() {
+            bind(value, to: statement, index: Int32(index + 1))
+        }
+        var tracks: [Track] = []
+        var artworkPool: [Data: Data] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            tracks.append(readTrack(statement, playCountIndex: 26, artworkPool: &artworkPool))
+        }
+        return tracks
+    }
+
+    func removeMissingFiles() throws -> [String] {
         let statement = try prepare("SELECT id, path FROM tracks")
         defer { sqlite3_finalize(statement) }
-        var missing: [String] = []
+        var missing: [(id: String, path: String)] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             guard let path = sqlite3_column_text(statement, 1) else { continue }
             let string = String(cString: path)
             if !FileManager.default.fileExists(atPath: string) {
-                if let id = sqlite3_column_text(statement, 0) { missing.append(String(cString: id)) }
+                if let id = sqlite3_column_text(statement, 0) {
+                    missing.append((String(cString: id), string))
+                }
             }
         }
-        for id in missing {
-            try execute("DELETE FROM tracks WHERE id = ?", bindings: [id])
-            try execute("DELETE FROM tracks_fts WHERE track_id = ?", bindings: [id])
+        try withTransaction {
+            for item in missing {
+                try execute("DELETE FROM tracks_fts WHERE track_id = ?", bindings: [item.id])
+                try execute("DELETE FROM tracks WHERE id = ?", bindings: [item.id])
+            }
         }
+        return missing.map(\.path)
     }
 
     func updateMatch(trackID: String, result: MetadataMatchResult) throws {
@@ -769,6 +926,7 @@ actor LibraryDatabase {
             if existingVersion < 7 { try migrateSyncedLyricsCacheSchema(connection) }
             if existingVersion < 8 { try migrateMetadataOverridesSchema(connection) }
             if existingVersion < 9 { try migrateReplayGainSchema(connection) }
+            if existingVersion < 10 { try migrateSmartPlaylistSchema(connection) }
 
             // Older development builds created tables without recording a schema
             // version. These checks make that migration safe and idempotent.
@@ -854,6 +1012,18 @@ actor LibraryDatabase {
         if !tableContainsColumn(on: connection, table: "tracks", column: "replay_gain_album") {
             try executeRaw(connection, "ALTER TABLE tracks ADD COLUMN replay_gain_album REAL")
         }
+    }
+
+    private nonisolated static func migrateSmartPlaylistSchema(_ connection: OpaquePointer) throws {
+        try executeRaw(connection, """
+        CREATE TABLE IF NOT EXISTS smart_playlists (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            configuration BLOB NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        """)
     }
 
     private nonisolated static func migrateSearchSchema(_ connection: OpaquePointer) throws {
@@ -1143,6 +1313,44 @@ actor LibraryDatabase {
         return history
     }
 
+    private func smartPlaylistTrackCount(configuration: SmartPlaylistConfiguration) throws -> Int {
+        let query = try SmartPlaylistSQLQuery.build(configuration: configuration, includeOrder: false)
+        let statement = try prepare("""
+            SELECT COUNT(*) FROM (
+                SELECT t.id
+                FROM tracks t
+                LEFT JOIN track_metadata_overrides o ON o.track_id = t.id
+                LEFT JOIN play_history ph ON ph.track_id = t.id
+                GROUP BY t.id
+                \(query.havingClause)
+                LIMIT ?
+            )
+            """)
+        defer { sqlite3_finalize(statement) }
+        let bindings = query.bindings + [String(configuration.limit ?? -1)]
+        for (index, value) in bindings.enumerated() {
+            bind(value, to: statement, index: Int32(index + 1))
+        }
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw UziqError.database(errorMessage) }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    private func smartPlaylistCreatedAt(id: String) throws -> Date {
+        let statement = try prepare("SELECT created_at FROM smart_playlists WHERE id = ?")
+        defer { sqlite3_finalize(statement) }
+        bind(id, to: statement, index: 1)
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw UziqError.database("The smart playlist no longer exists")
+        }
+        return Date(timeIntervalSince1970: sqlite3_column_double(statement, 0))
+    }
+
+    private func data(_ statement: OpaquePointer, column: Int32) -> Data? {
+        guard sqlite3_column_type(statement, column) != SQLITE_NULL,
+              let bytes = sqlite3_column_blob(statement, column) else { return nil }
+        return Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, column)))
+    }
+
     private func prepare(_ sql: String) throws -> OpaquePointer {
         try ensureReady()
         var statement: OpaquePointer?
@@ -1182,6 +1390,15 @@ actor LibraryDatabase {
         guard sqlite3_step(statement) == SQLITE_ROW, let value = sqlite3_column_text(statement, 0) else {
             throw UziqError.database("Expected a database result")
         }
+        return String(cString: value)
+    }
+
+    private func optionalScalarString(_ sql: String, bindings: [String]) throws -> String? {
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        for (index, value) in bindings.enumerated() { bind(value, to: statement, index: Int32(index + 1)) }
+        guard sqlite3_step(statement) == SQLITE_ROW,
+              let value = sqlite3_column_text(statement, 0) else { return nil }
         return String(cString: value)
     }
 

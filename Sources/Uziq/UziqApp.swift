@@ -225,4 +225,5 @@ extension Notification.Name {
     static let uziqShowOnboarding = Notification.Name("uziq.showOnboarding")
     static let uziqWillSleep = Notification.Name("uziq.willSleep")
     static let uziqDidWake = Notification.Name("uziq.didWake")
+    static let uziqLibraryFilesRemoved = Notification.Name("uziq.libraryFilesRemoved")
 }

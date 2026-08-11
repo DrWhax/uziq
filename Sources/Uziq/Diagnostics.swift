@@ -163,6 +163,8 @@ enum DiagnosticsReport {
             "Queue sources: \(PlaybackSource.allCases.map { "\($0.title)=\(sourceCounts[$0, default: 0])" }.joined(separator: ", "))",
             "Shuffle: \(yesNo(queue.shuffleEnabled))",
             "Repeat: \(queue.repeatMode.title)",
+            "Audio output: \(playback.activeOutputDeviceName)",
+            "Audio output selection: \(playback.selectedOutputDeviceUID == AudioOutputSelection.systemDefaultUID ? "System Default" : "Specific device")",
             "Equalizer: \(playback.equalizerEnabled ? playback.equalizerPreset.title : "Off")",
             "",
             "Current errors",

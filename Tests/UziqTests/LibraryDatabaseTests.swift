@@ -191,6 +191,75 @@ final class LibraryDatabaseTests: XCTestCase {
         XCTAssertEqual(recentArtists.first?.playCount, 2)
     }
 
+    func testRootReconciliationUpdatesAndRemovesOnlyTracksInsideThatRoot() async throws {
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let root = URL(fileURLWithPath: "/tmp/uziq-watch/Music", isDirectory: true)
+        let changedPath = root.appendingPathComponent("changed.flac").path
+        let removedPath = root.appendingPathComponent("removed.flac").path
+        let siblingPath = "/tmp/uziq-watch/Music Archive/keep.flac"
+        let oldDate = Date(timeIntervalSince1970: 100)
+        try await database.upsertBatch([
+            makeMetadata(path: changedPath, title: "Old title", modifiedAt: oldDate, fileSize: 10),
+            makeMetadata(path: removedPath, title: "Remove me", modifiedAt: oldDate, fileSize: 20),
+            makeMetadata(path: siblingPath, title: "Keep me", modifiedAt: oldDate, fileSize: 30)
+        ])
+
+        let indexed = try await database.indexedFiles(under: root)
+        XCTAssertEqual(Set(indexed.keys), [changedPath, removedPath])
+
+        let newDate = Date(timeIntervalSince1970: 200)
+        try await database.applyReconciliation(LibraryReconciliation(
+            changedMetadata: [
+                makeMetadata(path: changedPath, title: "New title", modifiedAt: newDate, fileSize: 11)
+            ],
+            removedPaths: [removedPath],
+            discoveredCount: 1
+        ))
+
+        let tracks = try await database.fetchTracks()
+        XCTAssertEqual(Set(tracks.map(\.url.path)), [changedPath, siblingPath])
+        XCTAssertEqual(tracks.first(where: { $0.url.path == changedPath })?.title, "New title")
+        XCTAssertEqual(tracks.first(where: { $0.url.path == changedPath })?.modifiedAt, newDate)
+    }
+
+    func testFolderWatcherCollapsesNestedRootsWithoutCollapsingPrefixSiblings() {
+        let music = URL(fileURLWithPath: "/tmp/uziq-roots/Music", isDirectory: true)
+        let nested = music.appendingPathComponent("Albums", isDirectory: true)
+        let prefixSibling = URL(fileURLWithPath: "/tmp/uziq-roots/Music Archive", isDirectory: true)
+
+        let roots = FolderWatcher.minimalRoots([nested, prefixSibling, music, music])
+
+        XCTAssertEqual(Set(roots), [music, prefixSibling])
+        XCTAssertTrue(LibraryPath.contains(nested, in: music))
+        XCTAssertFalse(LibraryPath.contains(prefixSibling, in: music))
+    }
+
+    func testIncrementalScannerReportsRemovedFilesAndRejectsUnavailableRoots() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("uziq-reconcile-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let missingPath = directory.appendingPathComponent("gone.flac").path
+        let scanner = LibraryScanner()
+
+        let reconciliation = await scanner.reconcile(
+            root: directory,
+            indexedFiles: [
+                missingPath: IndexedAudioFile(modifiedAt: .now, fileSize: 42)
+            ]
+        )
+
+        XCTAssertEqual(reconciliation?.removedPaths, [missingPath])
+        XCTAssertEqual(reconciliation?.discoveredCount, 0)
+        XCTAssertEqual(reconciliation?.hasChanges, true)
+
+        let unavailable = await scanner.reconcile(
+            root: directory.appendingPathComponent("unmounted", isDirectory: true),
+            indexedFiles: [:]
+        )
+        XCTAssertNil(unavailable)
+    }
+
     func testBatchUpsertAndForeignKeyCascade() async throws {
         let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
         let first = makeMetadata(path: "/tmp/uziq-batch/missing-one.mp3", title: "One")
@@ -203,7 +272,7 @@ final class LibraryDatabaseTests: XCTestCase {
         let playlist = try await database.createPlaylist(name: "Cascade")
         let firstTrack = try XCTUnwrap(tracks.first)
         try await database.addTrack(trackID: firstTrack.id, toPlaylist: playlist.id)
-        try await database.removeMissingFiles()
+        _ = try await database.removeMissingFiles()
         let remainingPlaylistTracks = try await database.fetchPlaylistTracks(playlistID: playlist.id)
 
         XCTAssertTrue(remainingPlaylistTracks.isEmpty)
@@ -450,6 +519,98 @@ final class LibraryDatabaseTests: XCTestCase {
         XCTAssertEqual(playlistTracks.map(\.id), [track.id])
     }
 
+    func testSmartPlaylistsPersistAndEvaluateLiveMetadataFavoritesAndHistory() async throws {
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+        try await database.upsertBatch([
+            makeMetadata(
+                path: "/tmp/smart-a.flac",
+                title: "A Track",
+                artist: "Alpha",
+                genre: "Dream Pop",
+                year: "2025"
+            ),
+            makeMetadata(
+                path: "/tmp/smart-b.flac",
+                title: "B Track",
+                artist: "Beta",
+                genre: "Noise",
+                year: "2024"
+            ),
+            makeMetadata(
+                path: "/tmp/smart-c.flac",
+                title: "C Track",
+                artist: "Gamma",
+                genre: "Dream Pop",
+                year: "2023"
+            )
+        ])
+        let allTracks = try await database.fetchTracks()
+        let alpha = try XCTUnwrap(allTracks.first { $0.title == "A Track" })
+        let beta = try XCTUnwrap(allTracks.first { $0.title == "B Track" })
+        let gamma = try XCTUnwrap(allTracks.first { $0.title == "C Track" })
+        try await database.toggleFavorite(trackID: alpha.id)
+        for _ in 0..<3 { _ = try await database.recordPlay(trackID: alpha.id) }
+        _ = try await database.recordPlay(trackID: beta.id)
+        try await database.applyMetadataOverrides(
+            trackIDs: [gamma.id],
+            changes: MetadataOverrideChanges(artist: "Corrected Gamma")
+        )
+
+        let favoritesConfiguration = SmartPlaylistConfiguration(
+            matchMode: .all,
+            rules: [
+                SmartPlaylistRule(field: .genre, comparison: .contains, value: "dream"),
+                SmartPlaylistRule(field: .favorite, comparison: .isTrue)
+            ],
+            sortOrder: .mostPlayed,
+            limit: nil
+        )
+        let created = try await database.createSmartPlaylist(
+            name: "Favorite Dream Pop",
+            configuration: favoritesConfiguration
+        )
+        XCTAssertEqual(created.trackCount, 1)
+        let favoriteDreamTracks = try await database.fetchSmartPlaylistTracks(
+            configuration: favoritesConfiguration
+        )
+        let persistedSmartPlaylists = try await database.fetchSmartPlaylists()
+        XCTAssertEqual(favoriteDreamTracks.map(\.title), ["A Track"])
+        XCTAssertEqual(persistedSmartPlaylists.map(\.name), ["Favorite Dream Pop"])
+
+        let anyConfiguration = SmartPlaylistConfiguration(
+            matchMode: .any,
+            rules: [
+                SmartPlaylistRule(field: .artist, comparison: .equals, value: "Corrected Gamma"),
+                SmartPlaylistRule(field: .playCount, comparison: .greaterThan, value: "2")
+            ],
+            sortOrder: .title,
+            limit: 1
+        )
+        let updated = try await database.updateSmartPlaylist(
+            id: created.id,
+            name: "Current Picks",
+            configuration: anyConfiguration
+        )
+        XCTAssertEqual(updated.trackCount, 1)
+        let limitedCurrentPicks = try await database.fetchSmartPlaylistTracks(configuration: anyConfiguration)
+        XCTAssertEqual(limitedCurrentPicks.map(\.title), ["A Track"])
+
+        let neglectedConfiguration = SmartPlaylistConfiguration(
+            matchMode: .all,
+            rules: [
+                SmartPlaylistRule(field: .lastPlayed, comparison: .notInLastDays, value: "1")
+            ],
+            sortOrder: .title,
+            limit: nil
+        )
+        let neglectedTracks = try await database.fetchSmartPlaylistTracks(configuration: neglectedConfiguration)
+        XCTAssertEqual(neglectedTracks.map(\.title), ["C Track"])
+
+        try await database.deleteSmartPlaylist(id: created.id)
+        let remainingSmartPlaylists = try await database.fetchSmartPlaylists()
+        XCTAssertTrue(remainingSmartPlaylists.isEmpty)
+    }
+
     func testSplitReleaseAlbumsShareArtworkGroup() {
         let artwork = Data([0x01, 0x02, 0x03])
         let tracks = [
@@ -507,14 +668,23 @@ final class LibraryDatabaseTests: XCTestCase {
         )
     }
 
-    private func makeMetadata(path: String, title: String) -> TrackMetadata {
+    private func makeMetadata(
+        path: String,
+        title: String,
+        artist: String = "Batch Artist",
+        album: String = "Batch Album",
+        genre: String = "",
+        year: String = "",
+        modifiedAt: Date = .now,
+        fileSize: Int64 = 1
+    ) -> TrackMetadata {
         TrackMetadata(
             url: URL(fileURLWithPath: path), fileName: URL(fileURLWithPath: path).lastPathComponent,
-            title: title, artist: "Batch Artist", albumArtist: "Batch Artist", album: "Batch Album",
-            genre: "", year: "", trackNumber: nil, discNumber: nil, duration: 60,
+            title: title, artist: artist, albumArtist: artist, album: album,
+            genre: genre, year: year, trackNumber: nil, discNumber: nil, duration: 60,
             codec: "MP3", bitrate: nil, sampleRate: nil, artworkData: nil, lyrics: nil,
             musicBrainzRecordingID: nil, musicBrainzReleaseID: nil, acoustID: nil,
-            modifiedAt: .now, fileSize: 1
+            modifiedAt: modifiedAt, fileSize: fileSize
         )
     }
 
