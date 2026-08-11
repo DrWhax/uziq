@@ -647,7 +647,7 @@ final class JellyfinStore {
         let deviceKey = "jellyfin-device-id"
         let deviceID = defaults.string(forKey: deviceKey) ?? UUID().uuidString
         defaults.set(deviceID, forKey: deviceKey)
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.1"
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.2"
         let sessionConfiguration = URLSessionConfiguration.ephemeral
         sessionConfiguration.urlCache = nil
         sessionConfiguration.requestCachePolicy = .reloadIgnoringLocalCacheData

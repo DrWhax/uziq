@@ -66,6 +66,10 @@ struct UziqApp: App {
                     NotificationCenter.default.post(name: .uziqShowQueue, object: nil)
                 }
                     .keyboardShortcut("u", modifiers: [.command, .shift])
+                Button("Show Lyrics") {
+                    NotificationCenter.default.post(name: .uziqShowLyrics, object: nil)
+                }
+                    .keyboardShortcut("l", modifiers: [.command, .shift])
                 Button(queue.shuffleEnabled ? "Turn Shuffle Off" : "Turn Shuffle On") {
                     queue.shuffleEnabled.toggle()
                 }
@@ -203,6 +207,7 @@ extension Notification.Name {
     static let uziqToggleQueuePlayback = Notification.Name("uziq.toggleQueuePlayback")
     static let uziqShowNowPlaying = Notification.Name("uziq.showNowPlaying")
     static let uziqShowQueue = Notification.Name("uziq.showQueue")
+    static let uziqShowLyrics = Notification.Name("uziq.showLyrics")
     static let uziqShowOnboarding = Notification.Name("uziq.showOnboarding")
     static let uziqWillSleep = Notification.Name("uziq.willSleep")
     static let uziqDidWake = Notification.Name("uziq.didWake")

@@ -129,7 +129,7 @@ actor LRCLIBClient {
         guard let url = components.url else { throw LRCLIBError.invalidResponse }
 
         var request = URLRequest(url: url)
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.1"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.2"
         request.setValue("Uziq/\(version) (macOS music player; LRCLIB lyrics)", forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         let (data, response) = try await session.data(for: request)

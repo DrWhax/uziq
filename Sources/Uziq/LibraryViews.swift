@@ -31,6 +31,9 @@ struct TrackListView: View {
                         .frame(width: 220)
                     }
                     Spacer()
+                    if library.selectedSection == .library {
+                        LibraryFilterField(prompt: "Search songs", text: $library.searchText)
+                    }
                 }
                 .padding(.horizontal, 28)
                 .padding(.vertical, 18)
@@ -39,7 +42,7 @@ struct TrackListView: View {
 
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        if library.selectedSection == .library && !recentArtistCards.isEmpty {
+                        if library.selectedSection == .library && library.searchText.isEmpty && !recentArtistCards.isEmpty {
                             RecentlyPlayedArtistsCarousel(
                                 artists: recentArtistCards,
                                 onSelect: { selectedArtist = $0 }
@@ -65,6 +68,9 @@ struct TrackListView: View {
                                     description: Text("Tracks you start playing will appear here.")
                                 )
                                 .frame(maxWidth: .infinity, minHeight: 220)
+                            } else if library.selectedSection == .library && !library.searchText.isEmpty {
+                                ContentUnavailableView.search(text: library.searchText)
+                                    .frame(maxWidth: .infinity, minHeight: 220)
                             } else {
                                 ContentUnavailableView(
                                     "Your library is waiting",
@@ -88,6 +94,12 @@ struct TrackListView: View {
             }
             .navigationDestination(item: $selectedArtist) { artist in
                 ArtistDetailView(artist: artist)
+            }
+            .task(id: library.searchText) {
+                guard library.selectedSection == .library else { return }
+                try? await Task.sleep(for: .milliseconds(220))
+                guard !Task.isCancelled else { return }
+                await library.refresh()
             }
         }
     }
@@ -287,6 +299,7 @@ struct ArtistArtworkProgressView: View {
 struct AlbumsLibraryView: View {
     @Environment(LibraryStore.self) private var library
     @State private var selectedAlbum: AlbumGroup?
+    @State private var filterText = ""
 
     private let columns = [GridItem(.adaptive(minimum: 170, maximum: 230), spacing: 24)]
 
@@ -294,9 +307,15 @@ struct AlbumsLibraryView: View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 22) {
-                    LibraryHeading(title: "Albums", subtitle: "\(albums.count) albums")
+                    HStack(alignment: .bottom, spacing: 20) {
+                        LibraryHeading(title: "Albums", subtitle: albumSubtitle)
+                        LibraryFilterField(prompt: "Filter albums", text: $filterText)
+                    }
                     if albums.isEmpty && library.isPreparingBrowseSnapshot {
                         LibraryBrowsePreparingView(label: "Organizing albums…")
+                    } else if albums.isEmpty && !filterText.isEmpty {
+                        ContentUnavailableView.search(text: filterText)
+                            .frame(maxWidth: .infinity, minHeight: 260)
                     } else {
                         LazyVGrid(columns: columns, alignment: .leading, spacing: 24) {
                             ForEach(albums) { album in
@@ -316,21 +335,41 @@ struct AlbumsLibraryView: View {
         }
     }
 
-    private var albums: [AlbumGroup] { library.browseSnapshot.albums }
+    private var albums: [AlbumGroup] {
+        let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return library.browseSnapshot.albums }
+        return library.browseSnapshot.albums.filter {
+            $0.title.localizedCaseInsensitiveContains(query) ||
+                $0.artist.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private var albumSubtitle: String {
+        filterText.isEmpty
+            ? "\(library.browseSnapshot.albums.count) albums"
+            : "\(albums.count) of \(library.browseSnapshot.albums.count) albums"
+    }
 }
 
 struct ArtistsLibraryView: View {
     @Environment(LibraryStore.self) private var library
+    @State private var filterText = ""
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 22) {
-                    LibraryHeading(title: "Artists", subtitle: "\(library.browseSnapshot.artistCount) artists")
-                    if library.browseSnapshot.artistSections.isEmpty && library.isPreparingBrowseSnapshot {
+                    HStack(alignment: .bottom, spacing: 20) {
+                        LibraryHeading(title: "Artists", subtitle: artistSubtitle)
+                        LibraryFilterField(prompt: "Filter artists", text: $filterText)
+                    }
+                    if artistSections.isEmpty && library.isPreparingBrowseSnapshot {
                         LibraryBrowsePreparingView(label: "Organizing artists…")
+                    } else if artistSections.isEmpty && !filterText.isEmpty {
+                        ContentUnavailableView.search(text: filterText)
+                            .frame(maxWidth: .infinity, minHeight: 260)
                     } else {
-                        ForEach(library.browseSnapshot.artistSections) { section in
+                        ForEach(artistSections) { section in
                             VStack(alignment: .leading, spacing: 10) {
                                 Text(section.letter)
                                     .font(.title2.weight(.bold))
@@ -361,6 +400,24 @@ struct ArtistsLibraryView: View {
                 library.refreshArtistArtworkIfNeeded()
             }
         }
+    }
+
+    private var filteredArtists: [ArtistGroup] {
+        let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return library.browseSnapshot.artists }
+        return library.browseSnapshot.artists.filter {
+            $0.name.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private var artistSections: [ArtistLetterSection] {
+        ArtistLetterSection.grouped(filteredArtists)
+    }
+
+    private var artistSubtitle: String {
+        filterText.isEmpty
+            ? "\(library.browseSnapshot.artistCount) artists"
+            : "\(filteredArtists.count) of \(library.browseSnapshot.artistCount) artists"
     }
 
 }
@@ -579,6 +636,35 @@ struct LibraryHeading: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+        }
+    }
+}
+
+private struct LibraryFilterField: View {
+    let prompt: String
+    @Binding var text: String
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField(prompt, text: $text)
+                .textFieldStyle(.plain)
+            if !text.isEmpty {
+                Button { text = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear filter")
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(width: 250, height: 30)
+        .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(.separator.opacity(0.45), lineWidth: 0.5)
         }
     }
 }

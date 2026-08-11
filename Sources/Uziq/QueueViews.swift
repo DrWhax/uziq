@@ -12,12 +12,7 @@ struct UpNextView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            VSplitView {
-                queuePane
-                    .frame(minHeight: 230, idealHeight: 320)
-                ProviderLyricsView()
-                    .frame(minHeight: 180, idealHeight: 320)
-            }
+            queuePane
         }
         .background(.bar)
     }
@@ -148,13 +143,18 @@ struct UpNextView: View {
     }
 }
 
-private struct ProviderLyricsView: View {
+struct ProviderLyricsView: View {
     @Environment(PlaybackQueueStore.self) private var queue
     @Environment(PlaybackEngine.self) private var playback
     @Environment(LibraryStore.self) private var library
     @Environment(SpotifyStore.self) private var spotify
     @Environment(JellyfinStore.self) private var jellyfin
     @State private var state: ProviderLyricsState = .idle
+    let onClose: (() -> Void)?
+
+    init(onClose: (() -> Void)? = nil) {
+        self.onClose = onClose
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -169,6 +169,15 @@ private struct ProviderLyricsView: View {
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
                         .background(.quaternary, in: Capsule())
+                }
+                if let onClose {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .frame(width: 28, height: 28)
+                            .background(.quaternary, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Close Lyrics")
                 }
             }
             .padding(.horizontal, 16)

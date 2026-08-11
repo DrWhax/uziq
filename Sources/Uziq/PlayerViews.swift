@@ -103,6 +103,7 @@ struct MiniPlayerView: View {
     @Environment(JellyfinStore.self) private var jellyfin
     let onOpen: () -> Void
     let onOpenQueue: () -> Void
+    let onOpenLyrics: () -> Void
 
     var body: some View {
         VStack(spacing: 10) {
@@ -151,6 +152,11 @@ struct MiniPlayerView: View {
                         )
                         ReplayTrackButton()
                         RandomPlaybackMenu()
+                        Button(action: onOpenLyrics) {
+                            Image(systemName: "text.quote")
+                                .frame(width: 34, height: 34).background(.quaternary, in: Circle())
+                        }
+                        .buttonStyle(.plain).help("Show Lyrics")
                         Button(action: onOpenQueue) {
                             Image(systemName: "list.bullet.rectangle")
                                 .frame(width: 34, height: 34).background(.quaternary, in: Circle())

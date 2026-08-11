@@ -3,6 +3,11 @@ import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
+private enum PlayerInspector {
+    case queue
+    case lyrics
+}
+
 struct ContentView: View {
     @Environment(LibraryStore.self) private var library
     @Environment(PlaybackEngine.self) private var playback
@@ -11,7 +16,7 @@ struct ContentView: View {
     @Environment(JellyfinStore.self) private var jellyfin
     @Environment(PlaybackQueueStore.self) private var queue
     @State private var showingNowPlaying = false
-    @State private var showingQueue = false
+    @State private var playerInspector: PlayerInspector?
     @State private var showingOnboarding = false
     @AppStorage("has-completed-onboarding") private var hasCompletedOnboarding = false
     @State private var globalSearchText = ""
@@ -30,7 +35,8 @@ struct ContentView: View {
             Divider()
             MiniPlayerView(
                 onOpen: { showingNowPlaying = true },
-                onOpenQueue: { showingQueue.toggle() }
+                onOpenQueue: { toggleInspector(.queue) },
+                onOpenLyrics: { toggleInspector(.lyrics) }
             )
 
             if library.isScanning {
@@ -47,14 +53,24 @@ struct ContentView: View {
             ToolbarItem(placement: .automatic) {
                 globalSearchField
             }
-            ToolbarItem(placement: .primaryAction) {
-                Button { showingQueue.toggle() } label: {
-                    Image(systemName: "list.bullet.rectangle")
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button { toggleInspector(.lyrics) } label: {
+                    Image(systemName: "text.quote")
+                        .foregroundStyle(playerInspector == .lyrics ? Color.accentColor : .primary)
                 }
-                .help(showingQueue ? "Hide Up Next" : "Show Up Next")
+                .help(playerInspector == .lyrics ? "Hide Lyrics" : "Show Lyrics")
+
+                Button { toggleInspector(.queue) } label: {
+                    Image(systemName: "list.bullet.rectangle")
+                        .foregroundStyle(playerInspector == .queue ? Color.accentColor : .primary)
+                }
+                .help(playerInspector == .queue ? "Hide Up Next" : "Show Up Next")
             }
         }
-        .inspector(isPresented: $showingQueue) { queueInspector }
+        .inspector(isPresented: inspectorPresented) {
+            playerInspectorView
+                .inspectorColumnWidth(min: 300, ideal: 360, max: 480)
+        }
         .onChange(of: globalSearchText) { _, newValue in
             guard searchProvider == .local else { return }
             library.searchText = newValue
@@ -84,7 +100,10 @@ struct ContentView: View {
             showingNowPlaying = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .uziqShowQueue)) { _ in
-            showingQueue = true
+            playerInspector = .queue
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .uziqShowLyrics)) { _ in
+            playerInspector = .lyrics
         }
         .onReceive(NotificationCenter.default.publisher(for: .uziqShowOnboarding)) { _ in
             showingOnboarding = true
@@ -146,9 +165,27 @@ struct ContentView: View {
         )
     }
 
-    private var queueInspector: some View {
-        UpNextView(onClose: { showingQueue = false })
-            .inspectorColumnWidth(min: 300, ideal: 360, max: 480)
+    private var inspectorPresented: Binding<Bool> {
+        Binding(
+            get: { playerInspector != nil },
+            set: { if !$0 { playerInspector = nil } }
+        )
+    }
+
+    @ViewBuilder
+    private var playerInspectorView: some View {
+        switch playerInspector {
+        case .queue:
+            UpNextView(onClose: { playerInspector = nil })
+        case .lyrics:
+            ProviderLyricsView(onClose: { playerInspector = nil })
+        case nil:
+            EmptyView()
+        }
+    }
+
+    private func toggleInspector(_ inspector: PlayerInspector) {
+        playerInspector = playerInspector == inspector ? nil : inspector
     }
 
     private var globalSearchField: some View {
