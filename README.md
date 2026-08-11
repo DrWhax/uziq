@@ -2,6 +2,16 @@
 
 Uziq is a modern macOS SwiftUI music player for large local libraries, Bandcamp discovery, lightweight Spotify playback, and self-hosted Jellyfin music. It recursively scans persistent folder roots, reads embedded metadata, indexes titles/artists/albums with SQLite FTS5, and sends local, Bandcamp, and Jellyfin playback through an AVFoundation audio engine with a ten-band equalizer.
 
+## Screenshots
+
+| Library | Albums |
+| :---: | :---: |
+| ![Uziq local music library](Images/Library.png) | ![Uziq album collection](Images/Albums.png) |
+
+| Bandcamp | Jellyfin |
+| :---: | :---: |
+| ![Bandcamp collection and discovery in Uziq](Images/Bandcamp.png) | ![Jellyfin music library in Uziq](Images/Jellyfin.png) |
+
 ## Run
 
 Open the repository in Xcode and run the `Uziq` executable target, or use:
