@@ -31,7 +31,10 @@ final class LRCLIBClientTests: XCTestCase {
             duration: 183.2
         ))
 
-        XCTAssertEqual(result, .lyrics("First line\nSecond line"))
+        XCTAssertEqual(result, .lyrics(LyricsPayload(
+            plain: "First line\nSecond line",
+            synced: nil
+        )))
         let request = try XCTUnwrap(LRCLIBURLProtocolStub.requests.first)
         XCTAssertEqual(request.url?.path, "/api/get")
         let components = try XCTUnwrap(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false))
@@ -40,7 +43,7 @@ final class LRCLIBClientTests: XCTestCase {
         XCTAssertTrue(request.value(forHTTPHeaderField: "User-Agent")?.hasPrefix("Uziq/") == true)
     }
 
-    func testMissingExactMatchFallsBackToSearchAndStripsSyncedTimestamps() async throws {
+    func testMissingExactMatchFallsBackToSearchAndPreservesSyncedTimestamps() async throws {
         LRCLIBURLProtocolStub.responses = [
             .init(statusCode: 404, body: "{}"),
             .init(statusCode: 200, body: """
@@ -64,8 +67,23 @@ final class LRCLIBClientTests: XCTestCase {
             duration: 183.2
         ))
 
-        XCTAssertEqual(result, .lyrics("First line\nSecond line"))
+        XCTAssertEqual(result, .lyrics(LyricsPayload(
+            plain: "First line\nSecond line",
+            synced: "[00:01.20]First line\n[00:05.00]Second line"
+        )))
         XCTAssertEqual(LRCLIBURLProtocolStub.requests.map { $0.url?.path }, ["/api/get", "/api/search"])
+    }
+
+    func testSyncedLyricsParserHandlesFractionsMultipleTimestampsAndOffset() {
+        let lines = SyncedLyricsParser.parse("""
+            [offset:+250]
+            [00:01.20]First line
+            [00:05.5][00:07.500]Repeated line
+            [ar:An Artist]
+            """)
+
+        XCTAssertEqual(lines.map(\.text), ["First line", "Repeated line", "Repeated line"])
+        XCTAssertEqual(lines.map(\.time), [1.45, 5.75, 7.75])
     }
 
     func testRateLimitIsReportedWithoutSearching() async throws {

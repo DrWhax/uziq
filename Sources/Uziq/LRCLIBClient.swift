@@ -41,13 +41,13 @@ struct LRCLIBQuery: Sendable, Equatable {
 }
 
 enum LRCLIBLookup: Sendable, Equatable {
-    case lyrics(String)
+    case lyrics(LyricsPayload)
     case instrumental
     case notFound
 }
 
 enum LocalLyricsLookupResult: Sendable, Equatable {
-    case lyrics(String)
+    case lyrics(LyricsPayload)
     case instrumental
     case notFound
     case unavailable(String)
@@ -147,8 +147,11 @@ actor LRCLIBClient {
 
     private static func lookup(from record: LRCLIBRecord) -> LRCLIBLookup {
         if record.instrumental { return .instrumental }
-        if let lyrics = normalized(record.plainLyrics) ?? normalized(strippingTimestamps(from: record.syncedLyrics)) {
-            return .lyrics(lyrics)
+        let synced = normalized(record.syncedLyrics)
+        if let lyrics = normalized(record.plainLyrics) ?? synced.map({
+            SyncedLyricsParser.parse($0).map(\.text).joined(separator: "\n")
+        }).flatMap(normalized) {
+            return .lyrics(LyricsPayload(plain: lyrics, synced: synced))
         }
         return .notFound
     }
@@ -182,19 +185,6 @@ actor LRCLIBClient {
     private static func normalized(_ value: String?) -> String? {
         let value = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return value.isEmpty ? nil : value
-    }
-
-    private static func strippingTimestamps(from value: String?) -> String? {
-        guard let value else { return nil }
-        let lines = value.split(whereSeparator: \.isNewline).compactMap { line -> String? in
-            var text = String(line)
-            while text.first == "[", let closing = text.firstIndex(of: "]") {
-                text.removeSubrange(text.startIndex...closing)
-            }
-            text = text.trimmingCharacters(in: .whitespaces)
-            return text.isEmpty ? nil : text
-        }
-        return lines.joined(separator: "\n")
     }
 
     private static func retryDate(from response: HTTPURLResponse) -> Date? {

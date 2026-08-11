@@ -12,7 +12,7 @@ actor LibraryDatabase {
     private let databaseURL: URL
     private let initializationError: String?
 
-    nonisolated static let currentSchemaVersion = 6
+    nonisolated static let currentSchemaVersion = 7
 
     init(databaseURL: URL? = nil) {
         let url: URL
@@ -420,41 +420,46 @@ actor LibraryDatabase {
     }
 
     func fetchCachedLyrics(key: String) throws -> CachedLyrics? {
-        let statement = try prepare("SELECT lyrics, is_instrumental, fetched_at FROM lyrics_cache WHERE lookup_key = ?")
+        let statement = try prepare("SELECT lyrics, synced_lyrics, is_instrumental, fetched_at FROM lyrics_cache WHERE lookup_key = ?")
         defer { sqlite3_finalize(statement) }
         bind(key, to: statement, index: 1)
         guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
         let lyrics = sqlite3_column_text(statement, 0).map { String(cString: $0) }
         return CachedLyrics(
             lyrics: lyrics,
-            isInstrumental: sqlite3_column_int(statement, 1) != 0,
-            fetchedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2))
+            syncedLyrics: sqlite3_column_text(statement, 1).map { String(cString: $0) },
+            isInstrumental: sqlite3_column_int(statement, 2) != 0,
+            fetchedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
         )
     }
 
     func cacheLyrics(key: String, result: LRCLIBLookup) throws {
         let statement = try prepare("""
-            INSERT INTO lyrics_cache(lookup_key, lyrics, is_instrumental, fetched_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO lyrics_cache(lookup_key, lyrics, synced_lyrics, is_instrumental, fetched_at)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(lookup_key) DO UPDATE SET
                 lyrics = excluded.lyrics,
+                synced_lyrics = excluded.synced_lyrics,
                 is_instrumental = excluded.is_instrumental,
                 fetched_at = excluded.fetched_at
             """)
         defer { sqlite3_finalize(statement) }
         switch result {
         case .lyrics(let lyrics):
-            bind(lyrics, to: statement, index: 2)
-            bind(Int64(0), to: statement, index: 3)
+            bind(lyrics.plain, to: statement, index: 2)
+            bind(lyrics.synced, to: statement, index: 3)
+            bind(Int64(0), to: statement, index: 4)
         case .instrumental:
             bind(nil as String?, to: statement, index: 2)
-            bind(Int64(1), to: statement, index: 3)
+            bind(nil as String?, to: statement, index: 3)
+            bind(Int64(1), to: statement, index: 4)
         case .notFound:
             bind(nil as String?, to: statement, index: 2)
-            bind(Int64(0), to: statement, index: 3)
+            bind(nil as String?, to: statement, index: 3)
+            bind(Int64(0), to: statement, index: 4)
         }
         bind(key, to: statement, index: 1)
-        bind(Date.now.timeIntervalSince1970, to: statement, index: 4)
+        bind(Date.now.timeIntervalSince1970, to: statement, index: 5)
         try step(statement)
     }
 
@@ -636,6 +641,7 @@ actor LibraryDatabase {
             if existingVersion < 4 { try removeOrphanedRows(connection) }
             if existingVersion < 5 { try migrateListeningHistorySchema(connection) }
             if existingVersion < 6 { try migrateLyricsCacheSchema(connection) }
+            if existingVersion < 7 { try migrateSyncedLyricsCacheSchema(connection) }
 
             // Older development builds created tables without recording a schema
             // version. These checks make that migration safe and idempotent.
@@ -782,10 +788,20 @@ actor LibraryDatabase {
         CREATE TABLE IF NOT EXISTS lyrics_cache (
             lookup_key TEXT PRIMARY KEY,
             lyrics TEXT,
+            synced_lyrics TEXT,
             is_instrumental INTEGER NOT NULL DEFAULT 0,
             fetched_at REAL NOT NULL
         );
         """)
+    }
+
+    private nonisolated static func migrateSyncedLyricsCacheSchema(_ connection: OpaquePointer) throws {
+        if !tableContainsColumn(on: connection, table: "lyrics_cache", column: "synced_lyrics") {
+            try executeRaw(connection, "ALTER TABLE lyrics_cache ADD COLUMN synced_lyrics TEXT")
+            // Version 6 discarded LRCLIB's synchronized payload. Refresh those
+            // positive entries once when they are next displayed.
+            try executeRaw(connection, "DELETE FROM lyrics_cache WHERE lyrics IS NOT NULL")
+        }
     }
 
     private nonisolated static func executeRaw(_ connection: OpaquePointer, _ sql: String) throws {

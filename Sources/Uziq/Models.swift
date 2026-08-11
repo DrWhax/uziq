@@ -192,6 +192,7 @@ struct TrackMetadata: Sendable {
 
 struct CachedLyrics: Sendable, Equatable {
     let lyrics: String?
+    let syncedLyrics: String?
     let isInstrumental: Bool
     let fetchedAt: Date
 }

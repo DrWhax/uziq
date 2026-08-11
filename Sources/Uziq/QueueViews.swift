@@ -176,32 +176,42 @@ private struct ProviderLyricsView: View {
 
             Divider()
 
-            ScrollView {
-                Group {
-                    switch state {
-                    case .idle:
-                        lyricsMessage("Choose something to play.", systemImage: "music.note")
-                    case .loading(let provider):
-                        HStack(spacing: 10) {
-                            ProgressView().controlSize(.small)
-                            Text("Loading lyrics from \(provider)…")
-                                .foregroundStyle(.secondary)
-                        }
-                    case .available(let lyrics, _):
-                        Text(lyrics)
-                            .font(.callout)
-                            .lineSpacing(4)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                    case .unavailable(let message):
-                        lyricsMessage(message, systemImage: "text.quote")
-                    }
-                }
-                .frame(maxWidth: .infinity, minHeight: 100, alignment: .topLeading)
-                .padding(16)
-            }
+            lyricsBody
         }
         .task(id: lyricsIdentity) { await loadLyrics() }
+    }
+
+    @ViewBuilder
+    private var lyricsBody: some View {
+        switch state {
+        case .idle:
+            lyricsMessage("Choose something to play.", systemImage: "music.note")
+                .padding(16)
+        case .loading(let provider):
+            HStack(spacing: 10) {
+                ProgressView().controlSize(.small)
+                Text("Loading lyrics from \(provider)…")
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 100, alignment: .topLeading)
+            .padding(16)
+        case .available(let lyrics, _):
+            if lyrics.timedLines.isEmpty {
+                ScrollView {
+                    Text(lyrics.plainText)
+                        .font(.callout)
+                        .lineSpacing(4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .padding(16)
+                }
+            } else {
+                SyncedLyricsView(lines: lyrics.timedLines)
+            }
+        case .unavailable(let message):
+            lyricsMessage(message, systemImage: "text.quote")
+                .padding(16)
+        }
     }
 
     private func lyricsMessage(_ message: String, systemImage: String) -> some View {
@@ -229,7 +239,7 @@ private struct ProviderLyricsView: View {
                 state = .unavailable("This local track is no longer available.")
                 return
             }
-            if let lyrics = normalizedLyrics(track.lyrics) {
+            if let lyrics = lyricsPresentation(track.lyrics) {
                 state = .available(lyrics, source: "Embedded")
                 return
             }
@@ -238,7 +248,10 @@ private struct ProviderLyricsView: View {
             guard !Task.isCancelled else { return }
             switch result {
             case .lyrics(let lyrics):
-                state = .available(lyrics, source: "LRCLIB")
+                state = .available(
+                    LyricsPresentation(plain: lyrics.plain, synced: lyrics.synced),
+                    source: "LRCLIB"
+                )
             case .instrumental:
                 state = .unavailable("LRCLIB identifies this track as instrumental.")
             case .notFound:
@@ -247,7 +260,7 @@ private struct ProviderLyricsView: View {
                 state = .unavailable(message)
             }
         case .bandcamp:
-            state = normalizedLyrics(playback.currentTrack?.lyrics)
+            state = lyricsPresentation(playback.currentTrack?.lyrics)
                 .map { .available($0, source: "Bandcamp") }
                 ?? .unavailable("Bandcamp did not provide lyrics for this track.")
         case .jellyfin:
@@ -258,24 +271,81 @@ private struct ProviderLyricsView: View {
             state = .loading(provider: "Jellyfin")
             let lyrics = await jellyfin.lyrics(for: item)
             guard !Task.isCancelled else { return }
-            state = lyrics.map { .available($0, source: "Jellyfin") }
+            state = lyrics.map { .available(LyricsPresentation(plain: $0), source: "Jellyfin") }
                 ?? .unavailable("Jellyfin has no lyrics for this track.")
         case .spotify:
             state = .unavailable("Lyrics aren’t available through Uziq’s Spotify integration.")
         }
     }
 
-    private func normalizedLyrics(_ value: String?) -> String? {
+    private func lyricsPresentation(_ value: String?) -> LyricsPresentation? {
         let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return normalized.isEmpty ? nil : normalized
+        return normalized.isEmpty ? nil : LyricsPresentation(plain: normalized)
     }
 }
 
 private enum ProviderLyricsState: Equatable {
     case idle
     case loading(provider: String)
-    case available(String, source: String)
+    case available(LyricsPresentation, source: String)
     case unavailable(String)
+}
+
+private struct SyncedLyricsView: View {
+    @Environment(PlaybackQueueStore.self) private var queue
+    let lines: [TimedLyricsLine]
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: queue.isPlaying ? 0.5 : 5)) { _ in
+            let activeIndex = lines.lastIndex { $0.time <= queue.currentTime + 0.05 }
+            let activeID = activeIndex.map { lines[$0].id }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 5) {
+                        ForEach(Array(lines.enumerated()), id: \.element.id) { index, line in
+                            Button {
+                                queue.seek(to: line.time)
+                            } label: {
+                                Text(line.text)
+                                    .font(.title3.weight(index == activeIndex ? .bold : .medium))
+                                    .foregroundStyle(lineColor(index: index, activeIndex: activeIndex))
+                                    .multilineTextAlignment(.leading)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        index == activeIndex ? Color.accentColor.opacity(0.13) : .clear,
+                                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    )
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .id(line.id)
+                            .help("Jump to \(formatted(line.time))")
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 50)
+                }
+                .onChange(of: activeID, initial: true) { _, newID in
+                    guard let newID else { return }
+                    withAnimation(.smooth(duration: 0.45)) {
+                        proxy.scrollTo(newID, anchor: .center)
+                    }
+                }
+            }
+        }
+    }
+
+    private func lineColor(index: Int, activeIndex: Int?) -> Color {
+        guard let activeIndex else { return .secondary }
+        if index == activeIndex { return .accentColor }
+        return index < activeIndex ? .primary.opacity(0.55) : .secondary.opacity(0.7)
+    }
+
+    private func formatted(_ seconds: Double) -> String {
+        String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60)
+    }
 }
 
 private struct QueueItemRow: View {

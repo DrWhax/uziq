@@ -105,7 +105,9 @@ final class LibraryStore {
         let key = query.cacheKey
         if let cached = try? await database.fetchCachedLyrics(key: key),
            cached.lyrics != nil || cached.isInstrumental || cached.fetchedAt > Date.now.addingTimeInterval(-30 * 24 * 60 * 60) {
-            if let lyrics = cached.lyrics { return .lyrics(lyrics) }
+            if let lyrics = cached.lyrics {
+                return .lyrics(LyricsPayload(plain: lyrics, synced: cached.syncedLyrics))
+            }
             return cached.isInstrumental ? .instrumental : .notFound
         }
         if let task = lyricsLookupTasks[key] { return await task.value }

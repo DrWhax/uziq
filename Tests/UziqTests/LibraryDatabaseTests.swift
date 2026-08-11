@@ -114,12 +114,19 @@ final class LibraryDatabaseTests: XCTestCase {
     func testLRCLIBLyricsAndMissesPersistInCache() async throws {
         let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
 
-        try await database.cacheLyrics(key: "lyrics-hit", result: .lyrics("A cached verse"))
+        try await database.cacheLyrics(
+            key: "lyrics-hit",
+            result: .lyrics(LyricsPayload(
+                plain: "A cached verse",
+                synced: "[00:02.00]A cached verse"
+            ))
+        )
         try await database.cacheLyrics(key: "instrumental", result: .instrumental)
         try await database.cacheLyrics(key: "missing", result: .notFound)
 
         let hit = try await database.fetchCachedLyrics(key: "lyrics-hit")
         XCTAssertEqual(hit?.lyrics, "A cached verse")
+        XCTAssertEqual(hit?.syncedLyrics, "[00:02.00]A cached verse")
         XCTAssertEqual(hit?.isInstrumental, false)
         let instrumental = try await database.fetchCachedLyrics(key: "instrumental")
         XCTAssertNil(instrumental?.lyrics)
