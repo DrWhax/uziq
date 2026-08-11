@@ -12,6 +12,10 @@ Uziq is a modern macOS SwiftUI music player for large local libraries, Bandcamp 
 | :---: | :---: |
 | ![Bandcamp collection and discovery in Uziq](Images/Bandcamp.png) | ![Jellyfin music library in Uziq](Images/Jellyfin.png) |
 
+### Spotify
+
+![Spotify library and playback in Uziq](Images/Spotify.png)
+
 ## Run
 
 Open the repository in Xcode and run the `Uziq` executable target, or use:
