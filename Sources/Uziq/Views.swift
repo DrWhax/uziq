@@ -257,7 +257,7 @@ struct SidebarView: View {
                 }
             }
             Section("Collections") {
-                ForEach([LibrarySection.playlists, .mostPlayed, .recentlyAdded], id: \.self) { section in
+                ForEach([LibrarySection.playlists, .history, .mostPlayed, .recentlyAdded], id: \.self) { section in
                     Label(section.title, systemImage: section.systemImage).tag(section)
                 }
             }
@@ -308,6 +308,8 @@ struct LibraryContentView: View {
                 SettingsView()
             } else if library.selectedSection == .playlists {
                 PlaylistsLibraryView()
+            } else if library.selectedSection == .history {
+                ListeningHistoryView()
             } else if library.selectedSection == .bandcamp {
                 BandcampLibraryView()
             } else if library.selectedSection == .spotify {
@@ -331,6 +333,8 @@ struct LibraryContentView: View {
                     GenresLibraryView()
                 case .playlists:
                     PlaylistsLibraryView()
+                case .history:
+                    ListeningHistoryView()
                 case .mostPlayed:
                     TrackListView()
                 case .bandcamp:

@@ -52,6 +52,8 @@ Uziq also publishes the current title, artist, album, artwork, duration, and pla
 - Embedded metadata, artwork, and lyrics extraction
 - AVAudioEngine playback with queue controls, waveform seeking, and equalization
 - Persistent universal queue with Play Next, reordering, shuffle, repeat, and session restoration
+- Unified, replayable listening history with weekly, monthly, and yearly cross-provider charts
+- Provider-aware lyrics from local metadata, cached LRCLIB lookups, Bandcamp, and connected Jellyfin servers
 - macOS Now Playing and Control Center metadata, seeking, and transport controls
 - Privacy-conscious diagnostics report export with a small rotating event log
 - Bandcamp search, subscriptions, streaming, fan collection, wishlist, followed-artist feed, and expiring caches

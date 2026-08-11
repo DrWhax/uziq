@@ -58,6 +58,17 @@ final class JellyfinTests: XCTestCase {
         XCTAssertEqual(restored.jellyfinItem?.id, "queue-track")
     }
 
+    func testJellyfinLyricsAreFlattenedWithoutBlankLines() {
+        let response = LyricDto(lyrics: [
+            LyricLine(start: 0, text: " First line "),
+            LyricLine(start: 10_000_000, text: ""),
+            LyricLine(start: 20_000_000, text: "Second line")
+        ])
+
+        XCTAssertEqual(JellyfinStore.lyricsText(from: response), "First line\nSecond line")
+        XCTAssertNil(JellyfinStore.lyricsText(from: LyricDto()))
+    }
+
     func testJellyfinCacheUsesStableExtensionAndSevenDayCleanup() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("uziq-jellyfin-cache-test-\(UUID().uuidString)", isDirectory: true)

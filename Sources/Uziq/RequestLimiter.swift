@@ -28,4 +28,6 @@ enum ProviderRequestLimiters {
     static let acoustID = RequestLimiter(minimumInterval: .milliseconds(350))
     static let coverArtArchive = RequestLimiter(minimumInterval: .milliseconds(200))
     static let lastFM = RequestLimiter(minimumInterval: .milliseconds(200))
+    // LRCLIB asks API clients to leave 200–500 ms between sequential requests.
+    static let lrclib = RequestLimiter(minimumInterval: .milliseconds(300))
 }

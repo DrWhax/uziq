@@ -55,20 +55,6 @@ struct NowPlayingView: View {
                         )
                         Image(systemName: "speaker.wave.3.fill").foregroundStyle(.secondary)
                     }
-
-                    Divider()
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Lyrics").font(.title3.weight(.bold))
-                        if let lyrics = playback.currentTrack?.lyrics, !lyrics.isEmpty {
-                            Text(lyrics)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                        } else {
-                            Text("No lyrics are available for this track yet.")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(28)
             }
@@ -105,6 +91,7 @@ struct NowPlayingView: View {
         if queue.currentItem?.source == .spotify { return spotify.playback?.album ?? queue.currentItem?.album ?? "" }
         return playback.currentTrack?.displayAlbum ?? queue.currentItem?.album ?? ""
     }
+
 }
 
 struct MiniPlayerView: View {

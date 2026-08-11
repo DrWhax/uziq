@@ -12,7 +12,7 @@ actor LibraryDatabase {
     private let databaseURL: URL
     private let initializationError: String?
 
-    nonisolated static let currentSchemaVersion = 4
+    nonisolated static let currentSchemaVersion = 6
 
     init(databaseURL: URL? = nil) {
         let url: URL
@@ -209,6 +209,84 @@ actor LibraryDatabase {
         return artists
     }
 
+    func recordListeningHistory(_ event: ListeningHistoryEvent) throws {
+        let queueData: Data
+        do {
+            queueData = try JSONEncoder().encode(event.queueItem)
+        } catch {
+            throw UziqError.database("Could not encode listening history: \(error.localizedDescription)")
+        }
+        let statement = try prepare("""
+            INSERT INTO listening_history(
+                item_key, source, source_id, title, artist, album,
+                artwork_url, queue_item, played_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(event.itemKey, to: statement, index: 1)
+        bind(event.source.rawValue, to: statement, index: 2)
+        bind(event.sourceID, to: statement, index: 3)
+        bind(event.title, to: statement, index: 4)
+        bind(event.artist, to: statement, index: 5)
+        bind(event.album, to: statement, index: 6)
+        bind(event.artworkURL?.absoluteString, to: statement, index: 7)
+        bind(queueData, to: statement, index: 8)
+        bind(event.playedAt.timeIntervalSince1970, to: statement, index: 9)
+        try step(statement)
+    }
+
+    func fetchRecentListeningHistory(limit: Int = 24) throws -> [ListeningHistoryItem] {
+        let statement = try prepare("""
+            SELECT h.item_key, h.source, h.source_id, h.title, h.artist, h.album,
+                   h.artwork_url, h.queue_item, h.played_at,
+                   (SELECT COUNT(*) FROM listening_history counts WHERE counts.item_key = h.item_key),
+                   t.path
+            FROM listening_history h
+            LEFT JOIN tracks t ON h.source = 'local' AND t.id = h.source_id
+            WHERE h.id = (
+                SELECT latest.id FROM listening_history latest
+                WHERE latest.item_key = h.item_key
+                ORDER BY latest.played_at DESC, latest.id DESC
+                LIMIT 1
+            )
+            ORDER BY h.played_at DESC, h.id DESC
+            LIMIT ?
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(max(1, limit), to: statement, index: 1)
+        return readListeningHistory(statement)
+    }
+
+    func fetchMostPlayedListeningHistory(
+        since: Date,
+        limit: Int = 100
+    ) throws -> [ListeningHistoryItem] {
+        let statement = try prepare("""
+            SELECT h.item_key, h.source, h.source_id, h.title, h.artist, h.album,
+                   h.artwork_url, h.queue_item, totals.last_played, totals.play_count,
+                   t.path
+            FROM (
+                SELECT item_key, COUNT(*) AS play_count, MAX(played_at) AS last_played
+                FROM listening_history
+                WHERE played_at >= ?
+                GROUP BY item_key
+            ) totals
+            JOIN listening_history h ON h.id = (
+                SELECT latest.id FROM listening_history latest
+                WHERE latest.item_key = totals.item_key
+                ORDER BY latest.played_at DESC, latest.id DESC
+                LIMIT 1
+            )
+            LEFT JOIN tracks t ON h.source = 'local' AND t.id = h.source_id
+            ORDER BY totals.play_count DESC, totals.last_played DESC, h.title COLLATE NOCASE
+            LIMIT ?
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(since.timeIntervalSince1970, to: statement, index: 1)
+        bind(max(1, limit), to: statement, index: 2)
+        return readListeningHistory(statement)
+    }
+
     func fetchArtistArtwork() throws -> [String: Data] {
         let statement = try prepare("SELECT artist, artwork FROM artist_artwork")
         defer { sqlite3_finalize(statement) }
@@ -338,6 +416,45 @@ actor LibraryDatabase {
         defer { sqlite3_finalize(statement) }
         bind(key, to: statement, index: 1)
         bind(Date.now.timeIntervalSince1970, to: statement, index: 2)
+        try step(statement)
+    }
+
+    func fetchCachedLyrics(key: String) throws -> CachedLyrics? {
+        let statement = try prepare("SELECT lyrics, is_instrumental, fetched_at FROM lyrics_cache WHERE lookup_key = ?")
+        defer { sqlite3_finalize(statement) }
+        bind(key, to: statement, index: 1)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        let lyrics = sqlite3_column_text(statement, 0).map { String(cString: $0) }
+        return CachedLyrics(
+            lyrics: lyrics,
+            isInstrumental: sqlite3_column_int(statement, 1) != 0,
+            fetchedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2))
+        )
+    }
+
+    func cacheLyrics(key: String, result: LRCLIBLookup) throws {
+        let statement = try prepare("""
+            INSERT INTO lyrics_cache(lookup_key, lyrics, is_instrumental, fetched_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(lookup_key) DO UPDATE SET
+                lyrics = excluded.lyrics,
+                is_instrumental = excluded.is_instrumental,
+                fetched_at = excluded.fetched_at
+            """)
+        defer { sqlite3_finalize(statement) }
+        switch result {
+        case .lyrics(let lyrics):
+            bind(lyrics, to: statement, index: 2)
+            bind(Int64(0), to: statement, index: 3)
+        case .instrumental:
+            bind(nil as String?, to: statement, index: 2)
+            bind(Int64(1), to: statement, index: 3)
+        case .notFound:
+            bind(nil as String?, to: statement, index: 2)
+            bind(Int64(0), to: statement, index: 3)
+        }
+        bind(key, to: statement, index: 1)
+        bind(Date.now.timeIntervalSince1970, to: statement, index: 4)
         try step(statement)
     }
 
@@ -517,6 +634,8 @@ actor LibraryDatabase {
             if existingVersion < 2 { try migrateMetadataCacheSchema(connection) }
             if existingVersion < 3 { try migrateSearchSchema(connection) }
             if existingVersion < 4 { try removeOrphanedRows(connection) }
+            if existingVersion < 5 { try migrateListeningHistorySchema(connection) }
+            if existingVersion < 6 { try migrateLyricsCacheSchema(connection) }
 
             // Older development builds created tables without recording a schema
             // version. These checks make that migration safe and idempotent.
@@ -622,6 +741,50 @@ actor LibraryDatabase {
         WHERE playlist_id NOT IN (SELECT id FROM playlists)
            OR track_id NOT IN (SELECT id FROM tracks);
         DELETE FROM play_history WHERE track_id NOT IN (SELECT id FROM tracks);
+        """)
+    }
+
+    private nonisolated static func migrateListeningHistorySchema(_ connection: OpaquePointer) throws {
+        try executeRaw(connection, """
+        CREATE TABLE IF NOT EXISTS listening_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_key TEXT NOT NULL,
+            source TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            artist TEXT NOT NULL,
+            album TEXT NOT NULL,
+            artwork_url TEXT,
+            queue_item BLOB,
+            legacy_play_id INTEGER UNIQUE,
+            played_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS listening_history_date_idx
+            ON listening_history(played_at DESC);
+        CREATE INDEX IF NOT EXISTS listening_history_item_date_idx
+            ON listening_history(item_key, played_at DESC);
+        INSERT OR IGNORE INTO listening_history(
+            item_key, source, source_id, title, artist, album,
+            artwork_url, queue_item, legacy_play_id, played_at
+        )
+        SELECT 'local:' || t.id, 'local', t.id,
+               CASE WHEN TRIM(t.title) = '' THEN t.file_name ELSE t.title END,
+               CASE WHEN TRIM(t.artist) = '' THEN 'Unknown Artist' ELSE t.artist END,
+               CASE WHEN TRIM(t.album) = '' THEN 'Unknown Album' ELSE t.album END,
+               NULL, NULL, ph.id, ph.played_at
+        FROM play_history ph
+        JOIN tracks t ON t.id = ph.track_id;
+        """)
+    }
+
+    private nonisolated static func migrateLyricsCacheSchema(_ connection: OpaquePointer) throws {
+        try executeRaw(connection, """
+        CREATE TABLE IF NOT EXISTS lyrics_cache (
+            lookup_key TEXT PRIMARY KEY,
+            lyrics TEXT,
+            is_instrumental INTEGER NOT NULL DEFAULT 0,
+            fetched_at REAL NOT NULL
+        );
         """)
     }
 
@@ -735,6 +898,61 @@ actor LibraryDatabase {
             isFavorite: sqlite3_column_int(statement, 23) != 0,
             playCount: playCountIndex.map { Int(sqlite3_column_int(statement, $0)) } ?? 0
         )
+    }
+
+    private func readListeningHistory(_ statement: OpaquePointer) -> [ListeningHistoryItem] {
+        func text(_ statement: OpaquePointer, _ index: Int32) -> String {
+            guard let value = sqlite3_column_text(statement, index) else { return "" }
+            return String(cString: value)
+        }
+
+        var history: [ListeningHistoryItem] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let itemKey = text(statement, 0)
+            guard let source = PlaybackSource(rawValue: text(statement, 1)) else { continue }
+            let sourceID = text(statement, 2)
+            let title = text(statement, 3)
+            let artist = text(statement, 4)
+            let album = text(statement, 5)
+            let artworkString = text(statement, 6)
+
+            let decodedQueueItem: UnifiedQueueItem? = {
+                guard sqlite3_column_type(statement, 7) != SQLITE_NULL,
+                      let bytes = sqlite3_column_blob(statement, 7) else { return nil }
+                let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 7)))
+                return try? JSONDecoder().decode(UnifiedQueueItem.self, from: data)
+            }()
+            let queueItem: UnifiedQueueItem?
+            if let decodedQueueItem {
+                queueItem = decodedQueueItem
+            } else if source == .local {
+                let path = text(statement, 10)
+                queueItem = path.isEmpty ? nil : UnifiedQueueItem(
+                    historyLocalID: sourceID,
+                    url: URL(fileURLWithPath: path),
+                    title: title,
+                    artist: artist,
+                    album: album
+                )
+            } else {
+                queueItem = nil
+            }
+            guard let queueItem else { continue }
+
+            history.append(ListeningHistoryItem(
+                itemKey: itemKey,
+                source: source,
+                sourceID: sourceID,
+                title: title,
+                artist: artist,
+                album: album,
+                artworkURL: artworkString.isEmpty ? nil : URL(string: artworkString),
+                queueItem: queueItem,
+                lastPlayedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 8)),
+                playCount: Int(sqlite3_column_int64(statement, 9))
+            ))
+        }
+        return history
     }
 
     private func prepare(_ sql: String) throws -> OpaquePointer {

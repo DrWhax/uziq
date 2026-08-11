@@ -647,6 +647,10 @@ final class BandcampStore {
         return isSaved(result)
     }
 
+    func playbackResult(for track: Track) -> BandcampResult? {
+        playbackResultsByTrackID[track.id]
+    }
+
     func toggleSaved(_ track: Track) {
         guard let result = playbackResultsByTrackID[track.id] else { return }
         toggleSaved(result)

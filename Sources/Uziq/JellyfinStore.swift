@@ -38,6 +38,8 @@ final class JellyfinStore {
     @ObservationIgnored private let imageCache = NSCache<NSString, NSData>()
     @ObservationIgnored private var imageTasks: [String: Task<Data?, Never>] = [:]
     @ObservationIgnored private var imageTaskGenerations: [String: UUID] = [:]
+    @ObservationIgnored private var lyricsCache: [String: String] = [:]
+    @ObservationIgnored private var missingLyricsIDs: Set<String> = []
     @ObservationIgnored private var connectTask: Task<Void, Never>?
     @ObservationIgnored private var searchTask: Task<Void, Never>?
     @ObservationIgnored private var playbackTask: Task<Void, Never>?
@@ -85,6 +87,15 @@ final class JellyfinStore {
     nonisolated static func isPlainHTTPAddress(_ value: String) -> Bool {
         URLComponents(string: value.trimmingCharacters(in: .whitespacesAndNewlines))?
             .scheme?.lowercased() == "http"
+    }
+
+    nonisolated static func lyricsText(from response: LyricDto) -> String? {
+        let text = (response.lyrics ?? [])
+            .compactMap(\.text)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        return text.isEmpty ? nil : text
     }
 
     func clearError() { error = nil }
@@ -400,6 +411,31 @@ final class JellyfinStore {
         return data
     }
 
+    func lyrics(for item: JellyfinCatalogItem) async -> String? {
+        guard item.kind == .track else { return nil }
+        if let cached = lyricsCache[item.id] { return cached }
+        if missingLyricsIDs.contains(item.id) { return nil }
+        guard let client else { return nil }
+        let connectionID = connectionGeneration
+        do {
+            let response = try await client.send(Paths.getLyrics(itemID: item.id)).value
+            try Task.checkCancellation()
+            guard connectionGeneration == connectionID else { return nil }
+            guard let text = Self.lyricsText(from: response) else {
+                missingLyricsIDs.insert(item.id)
+                return nil
+            }
+            lyricsCache[item.id] = text
+            return text
+        } catch {
+            guard !Task.isCancelled, connectionGeneration == connectionID else { return nil }
+            // Jellyfin commonly returns not-found when an audio item has no
+            // sidecar or embedded lyrics. Remember the miss for this session.
+            missingLyricsIDs.insert(item.id)
+            return nil
+        }
+    }
+
     func play(
         _ item: JellyfinCatalogItem,
         using playback: PlaybackEngine,
@@ -663,6 +699,8 @@ final class JellyfinStore {
         imageTasks.removeAll()
         imageTaskGenerations.removeAll()
         imageCache.removeAllObjects()
+        lyricsCache.removeAll()
+        missingLyricsIDs.removeAll()
         loadingOperations.removeAll()
         isLoading = false
     }

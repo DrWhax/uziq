@@ -279,6 +279,18 @@ final class LibrespotService {
     }
 
     @discardableResult
+    func suppressPlayback() -> Bool {
+        let accepted = send(.transport("pause"))
+        // Provider handoff ends ownership even before librespot acknowledges
+        // the command. A late event can reactivate this state and will be
+        // suppressed again by SpotifyStore.
+        isDirectPlaybackActive = false
+        isDirectPlaybackPlaying = false
+        directPlaybackURI = nil
+        return accepted
+    }
+
+    @discardableResult
     func next() -> Bool { send(.transport("next")) }
 
     @discardableResult

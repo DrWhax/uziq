@@ -77,6 +77,21 @@ struct UnifiedQueueItem: Identifiable, Codable, Hashable, Sendable {
         jellyfinItem = nil
     }
 
+    init(historyLocalID: String, url: URL, title: String, artist: String, album: String) {
+        id = UUID()
+        source = .local
+        sourceID = historyLocalID
+        self.title = title
+        self.artist = artist
+        self.album = album
+        duration = 0
+        localURL = url
+        artworkURL = nil
+        bandcampResult = nil
+        spotifyItem = nil
+        jellyfinItem = nil
+    }
+
     init(bandcamp result: BandcampResult) {
         id = UUID()
         source = .bandcamp
@@ -178,6 +193,7 @@ final class PlaybackQueueStore {
     @ObservationIgnored private weak var jellyfin: JellyfinStore?
     @ObservationIgnored private var finishObserver: NSObjectProtocol?
     @ObservationIgnored private var toggleObserver: NSObjectProtocol?
+    @ObservationIgnored private var trackPlayedObserver: NSObjectProtocol?
     @ObservationIgnored private var persistTimer: Timer?
     @ObservationIgnored private var spotifyPlaybackSeen = false
     @ObservationIgnored private var jellyfinPrefetchedItemID: String?
@@ -188,6 +204,9 @@ final class PlaybackQueueStore {
     @ObservationIgnored private var nowPlayingController: NowPlayingController?
     @ObservationIgnored private var randomPlaybackTask: Task<Void, Never>?
     @ObservationIgnored private var randomPlaybackGeneration = UUID()
+    @ObservationIgnored private var spotifyHistorySession = UUID()
+    @ObservationIgnored private var spotifyHistoryNotBefore = Date.distantPast
+    @ObservationIgnored private var lastSpotifyHistoryIdentity: String?
 
     init(sessionURL: URL? = nil) {
         sessionURLOverride = sessionURL
@@ -206,6 +225,14 @@ final class PlaybackQueueStore {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in self?.toggle() }
         }
+        trackPlayedObserver = NotificationCenter.default.addObserver(
+            forName: .uziqTrackPlayed,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let trackID = notification.object as? String else { return }
+            Task { @MainActor [weak self] in self?.recordEnginePlayback(trackID: trackID) }
+        }
         persistTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.timerFired() }
         }
@@ -214,6 +241,7 @@ final class PlaybackQueueStore {
     deinit {
         if let finishObserver { NotificationCenter.default.removeObserver(finishObserver) }
         if let toggleObserver { NotificationCenter.default.removeObserver(toggleObserver) }
+        if let trackPlayedObserver { NotificationCenter.default.removeObserver(trackPlayedObserver) }
         persistTimer?.invalidate()
         randomPlaybackTask?.cancel()
     }
@@ -300,6 +328,14 @@ final class PlaybackQueueStore {
         dispatchCurrent()
     }
 
+    func replace(with item: UnifiedQueueItem) {
+        cancelRandomPlayback()
+        items = [item]
+        currentIndex = 0
+        restoredPosition = 0
+        dispatchCurrent()
+    }
+
     func play(_ item: UnifiedQueueItem) {
         guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
         cancelRandomPlayback()
@@ -364,11 +400,13 @@ final class PlaybackQueueStore {
     func add(_ result: BandcampResult) { append(UnifiedQueueItem(bandcamp: result)) }
     func add(_ item: SpotifyCatalogItem) { append(UnifiedQueueItem(spotify: item)) }
     func add(_ item: JellyfinCatalogItem) { append(UnifiedQueueItem(jellyfin: item)) }
+    func add(_ item: UnifiedQueueItem) { append(item) }
 
     func playNext(_ track: Track) { insertNext(UnifiedQueueItem(local: track)) }
     func playNext(_ result: BandcampResult) { insertNext(UnifiedQueueItem(bandcamp: result)) }
     func playNext(_ item: SpotifyCatalogItem) { insertNext(UnifiedQueueItem(spotify: item)) }
     func playNext(_ item: JellyfinCatalogItem) { insertNext(UnifiedQueueItem(jellyfin: item)) }
+    func playNext(_ item: UnifiedQueueItem) { insertNext(item) }
 
     func remove(at offsets: IndexSet) {
         cancelRandomPlayback()
@@ -685,6 +723,9 @@ final class PlaybackQueueStore {
             updateNowPlaying(force: true)
         }
         error = nil
+        spotifyHistorySession = UUID()
+        spotifyHistoryNotBefore = .now
+        lastSpotifyHistoryIdentity = nil
         spotifyPlaybackSeen = false
         jellyfinPrefetchedItemID = nil
         DiagnosticsLog.shared.record("playback", "Dispatching \(item.source.title) queue item")
@@ -778,6 +819,7 @@ final class PlaybackQueueStore {
             jellyfinPrefetchedItemID = jellyfinItem.id
             jellyfin?.prefetch(jellyfinItem)
         }
+        recordSpotifyPlaybackIfNeeded()
         // Structural queue changes persist immediately. During playback, a
         // 15-second crash-recovery checkpoint avoids repeatedly encoding and
         // atomically rewriting a potentially large queue.
@@ -785,6 +827,87 @@ final class PlaybackQueueStore {
             persistSession()
         }
         updateNowPlaying()
+    }
+
+    private func recordEnginePlayback(trackID: String) {
+        guard let library,
+              let track = playback?.currentTrack,
+              track.id == trackID,
+              let source = currentItem?.source,
+              source != .spotify else { return }
+
+        let sourceID: String
+        let artworkURL: URL?
+        let replayItem: UnifiedQueueItem
+        switch source {
+        case .local:
+            sourceID = track.id
+            artworkURL = nil
+            replayItem = UnifiedQueueItem(local: track)
+        case .bandcamp:
+            guard let result = bandcamp?.playbackResult(for: track) else { return }
+            sourceID = result.id
+            artworkURL = result.artworkURL
+            replayItem = UnifiedQueueItem(bandcamp: result)
+        case .jellyfin:
+            guard let item = currentItem?.jellyfinItem,
+                  track.id == "jellyfin-\(item.id)" else { return }
+            sourceID = item.id
+            artworkURL = nil
+            replayItem = UnifiedQueueItem(jellyfin: item)
+        case .spotify:
+            return
+        }
+
+        library.recordListening(ListeningHistoryEvent(
+            source: source,
+            sourceID: sourceID,
+            title: track.displayTitle,
+            artist: track.displayArtist,
+            album: track.displayAlbum,
+            artworkURL: artworkURL,
+            queueItem: replayItem,
+            playedAt: .now
+        ))
+    }
+
+    private func recordSpotifyPlaybackIfNeeded() {
+        guard currentItem?.source == .spotify,
+              let library,
+              let snapshot = spotify?.playback,
+              snapshot.isPlaying,
+              snapshot.observedAt >= spotifyHistoryNotBefore else { return }
+        let identity = "\(spotifyHistorySession.uuidString):\(snapshot.itemID)"
+        guard lastSpotifyHistoryIdentity != identity else { return }
+
+        let spotifyItem: SpotifyCatalogItem
+        if let queued = currentItem?.spotifyItem,
+           queued.kind == .track,
+           queued.id == snapshot.itemID {
+            spotifyItem = queued
+        } else {
+            spotifyItem = SpotifyCatalogItem(
+                id: snapshot.itemID,
+                name: snapshot.title,
+                subtitle: snapshot.artist,
+                uri: "spotify:track:\(snapshot.itemID)",
+                kind: .track,
+                artworkURL: snapshot.artworkURL,
+                durationMS: snapshot.duration > 0 ? Int(snapshot.duration * 1_000) : nil,
+                itemCount: nil
+            )
+        }
+        lastSpotifyHistoryIdentity = identity
+        library.recordListening(ListeningHistoryEvent(
+            source: .spotify,
+            sourceID: snapshot.itemID,
+            title: snapshot.title,
+            artist: snapshot.artist,
+            album: snapshot.album,
+            artworkURL: snapshot.artworkURL,
+            queueItem: UnifiedQueueItem(spotify: spotifyItem),
+            playedAt: .now
+        ))
     }
 
     private func updateNowPlaying(force: Bool = false) {

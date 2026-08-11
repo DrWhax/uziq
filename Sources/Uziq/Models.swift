@@ -6,6 +6,7 @@ enum LibrarySection: String, CaseIterable, Identifiable {
     case albums
     case genres
     case playlists
+    case history
     case mostPlayed
     case recentlyAdded
     case bandcamp
@@ -17,7 +18,7 @@ enum LibrarySection: String, CaseIterable, Identifiable {
 
     var usesLocalLibrary: Bool {
         switch self {
-        case .bandcamp, .spotify, .jellyfin, .settings:
+        case .history, .bandcamp, .spotify, .jellyfin, .settings:
             false
         default:
             true
@@ -31,6 +32,7 @@ enum LibrarySection: String, CaseIterable, Identifiable {
         case .albums: "Albums"
         case .genres: "Genres"
         case .playlists: "Playlists"
+        case .history: "Listening History"
         case .mostPlayed: "Most Played"
         case .recentlyAdded: "Recently Added"
         case .bandcamp: "Bandcamp"
@@ -47,6 +49,7 @@ enum LibrarySection: String, CaseIterable, Identifiable {
         case .albums: "square.stack"
         case .genres: "guitars"
         case .playlists: "rectangle.stack"
+        case .history: "clock.arrow.circlepath"
         case .mostPlayed: "chart.bar.fill"
         case .recentlyAdded: "clock"
         case .bandcamp: "dot.radiowaves.left.and.right"
@@ -55,6 +58,34 @@ enum LibrarySection: String, CaseIterable, Identifiable {
         case .settings: "gearshape"
         }
     }
+}
+
+struct ListeningHistoryEvent: Hashable, Sendable {
+    let source: PlaybackSource
+    let sourceID: String
+    let title: String
+    let artist: String
+    let album: String
+    let artworkURL: URL?
+    let queueItem: UnifiedQueueItem
+    let playedAt: Date
+
+    var itemKey: String { "\(source.rawValue):\(sourceID)" }
+}
+
+struct ListeningHistoryItem: Identifiable, Hashable, Sendable {
+    let itemKey: String
+    let source: PlaybackSource
+    let sourceID: String
+    let title: String
+    let artist: String
+    let album: String
+    let artworkURL: URL?
+    let queueItem: UnifiedQueueItem
+    let lastPlayedAt: Date
+    let playCount: Int
+
+    var id: String { itemKey }
 }
 
 enum MostPlayedRange: String, CaseIterable, Identifiable {
@@ -157,6 +188,12 @@ struct TrackMetadata: Sendable {
     let acoustID: String?
     let modifiedAt: Date
     let fileSize: Int64
+}
+
+struct CachedLyrics: Sendable, Equatable {
+    let lyrics: String?
+    let isInstrumental: Bool
+    let fetchedAt: Date
 }
 
 struct PlaylistSummary: Identifiable, Hashable, Sendable {

@@ -12,8 +12,19 @@ extension SpotifyStore {
         isStartingPlayback: Bool,
         hasPendingItem: Bool
     ) -> Bool {
-        supportsDirectControl && !isSpotifyPlaybackSuppressed &&
+        // Treat provider handoff as idempotent. A late helper event can arrive
+        // after suppression and leave the helper active while the store remains
+        // marked suppressed; it still needs another pause command.
+        _ = isSpotifyPlaybackSuppressed
+        return supportsDirectControl &&
             (isDirectPlaybackActive || isStartingPlayback || hasPendingItem)
+    }
+
+    nonisolated static func shouldResuppressHelperEvent(
+        _ event: String,
+        isSpotifyPlaybackSuppressed: Bool
+    ) -> Bool {
+        isSpotifyPlaybackSuppressed && ["loading", "track_changed", "playing"].contains(event)
     }
 
     func suppressForNonSpotifyPlayback() {
@@ -30,10 +41,11 @@ extension SpotifyStore {
         // ignores a suppressed helper, which previously allowed Spotify and a
         // newly selected local/streaming source to play at the same time.
         if pauseDirectHelper {
-            _ = librespot.pause()
+            _ = librespot.suppressPlayback()
         } else if pauseWebPlayback {
             pause()
         }
+        playbackEngine?.endSpotifyPCMStream()
 
         playbackGeneration = UUID()
         isStartingPlayback = false
@@ -505,6 +517,17 @@ extension SpotifyStore {
     }
 
     func handleLibrespotEvent(_ event: LibrespotIPCEvent) {
+        if Self.shouldResuppressHelperEvent(
+            event.event,
+            isSpotifyPlaybackSuppressed: isSpotifyPlaybackSuppressed
+        ) {
+            // Random/context playback can publish a queued transition after a
+            // Jellyfin, Bandcamp, or local selection has taken over. Reassert
+            // the pause instead of allowing that stale transition to restart.
+            _ = librespot.suppressPlayback()
+            playbackEngine?.endSpotifyPCMStream()
+            return
+        }
         switch event.event {
         case "status":
             if event.state == "ready", isStartingPlayback {

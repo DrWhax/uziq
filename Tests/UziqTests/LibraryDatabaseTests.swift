@@ -51,6 +51,7 @@ final class LibraryDatabaseTests: XCTestCase {
                 'Legacy Artist', 'Legacy Album', '', '', 1, 1, 120, 'MP3', NULL, NULL,
                 NULL, NULL, NULL, NULL, NULL, 1, 1, 1
             );
+            INSERT INTO play_history(track_id, played_at) VALUES ('legacy-id', 2);
             """)
 
         let database = LibraryDatabase(databaseURL: databaseURL)
@@ -63,6 +64,9 @@ final class LibraryDatabaseTests: XCTestCase {
         try await database.toggleFavorite(trackID: "legacy-id")
         let favorites = try await database.fetchTracks(favoritesOnly: true)
         XCTAssertEqual(favorites.map(\.id), ["legacy-id"])
+        let migratedHistory = try await database.fetchRecentListeningHistory()
+        XCTAssertEqual(migratedHistory.map(\.sourceID), ["legacy-id"])
+        XCTAssertEqual(migratedHistory.first?.queueItem.localURL?.path, trackPath)
     }
 
     func testArtistProfilesAndFailedLookupAttemptsPersist() async throws {
@@ -105,6 +109,26 @@ final class LibraryDatabaseTests: XCTestCase {
             since: Date(timeIntervalSinceNow: 60)
         )
         XCTAssertTrue(futureAttempts.isEmpty)
+    }
+
+    func testLRCLIBLyricsAndMissesPersistInCache() async throws {
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+
+        try await database.cacheLyrics(key: "lyrics-hit", result: .lyrics("A cached verse"))
+        try await database.cacheLyrics(key: "instrumental", result: .instrumental)
+        try await database.cacheLyrics(key: "missing", result: .notFound)
+
+        let hit = try await database.fetchCachedLyrics(key: "lyrics-hit")
+        XCTAssertEqual(hit?.lyrics, "A cached verse")
+        XCTAssertEqual(hit?.isInstrumental, false)
+        let instrumental = try await database.fetchCachedLyrics(key: "instrumental")
+        XCTAssertNil(instrumental?.lyrics)
+        XCTAssertEqual(instrumental?.isInstrumental, true)
+        let missing = try await database.fetchCachedLyrics(key: "missing")
+        XCTAssertNil(missing?.lyrics)
+        XCTAssertEqual(missing?.isInstrumental, false)
+        let neverRequested = try await database.fetchCachedLyrics(key: "never-requested")
+        XCTAssertNil(neverRequested)
     }
 
     func testUpsertAndSearchByArtist() async throws {
@@ -190,6 +214,62 @@ final class LibraryDatabaseTests: XCTestCase {
 
         XCTAssertFalse(recorded)
         XCTAssertTrue(mostPlayed.isEmpty)
+    }
+
+    func testUnifiedListeningHistoryGroupsProvidersAndRoundTripsReplayItems() async throws {
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+        try await database.upsert(makeMetadata(
+            path: "/tmp/uziq-history-local.mp3",
+            title: "Local Favorite"
+        ))
+        let localTracks = try await database.fetchTracks()
+        let localTrack = try XCTUnwrap(localTracks.first)
+        let localQueueItem = UnifiedQueueItem(local: localTrack)
+        let spotifyTrack = SpotifyCatalogItem(
+            id: "spotify-history-track",
+            name: "Remote Favorite",
+            subtitle: "Remote Artist",
+            uri: "spotify:track:spotify-history-track",
+            kind: .track,
+            artworkURL: URL(string: "https://example.com/history.jpg"),
+            durationMS: 180_000,
+            itemCount: nil
+        )
+        let now = Date()
+
+        for playedAt in [now.addingTimeInterval(-60), now.addingTimeInterval(-30)] {
+            try await database.recordListeningHistory(ListeningHistoryEvent(
+                source: .local,
+                sourceID: localTrack.id,
+                title: localTrack.displayTitle,
+                artist: localTrack.displayArtist,
+                album: localTrack.displayAlbum,
+                artworkURL: nil,
+                queueItem: localQueueItem,
+                playedAt: playedAt
+            ))
+        }
+        try await database.recordListeningHistory(ListeningHistoryEvent(
+            source: .spotify,
+            sourceID: spotifyTrack.id,
+            title: spotifyTrack.name,
+            artist: spotifyTrack.subtitle,
+            album: "Remote Album",
+            artworkURL: spotifyTrack.artworkURL,
+            queueItem: UnifiedQueueItem(spotify: spotifyTrack),
+            playedAt: now
+        ))
+
+        let recent = try await database.fetchRecentListeningHistory()
+        let mostPlayed = try await database.fetchMostPlayedListeningHistory(
+            since: now.addingTimeInterval(-120)
+        )
+
+        XCTAssertEqual(recent.map(\.source), [.spotify, .local])
+        XCTAssertEqual(recent.first?.queueItem.spotifyItem?.uri, spotifyTrack.uri)
+        XCTAssertEqual(mostPlayed.first?.source, .local)
+        XCTAssertEqual(mostPlayed.first?.playCount, 2)
+        XCTAssertEqual(mostPlayed.first?.queueItem.localURL, localTrack.url)
     }
 
     func testFLACVorbisCommentsAreRead() async throws {

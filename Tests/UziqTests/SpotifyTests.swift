@@ -251,7 +251,7 @@ final class SpotifyTests: XCTestCase {
             isStartingPlayback: true,
             hasPendingItem: true
         ))
-        XCTAssertFalse(SpotifyStore.shouldPauseDirectHelper(
+        XCTAssertTrue(SpotifyStore.shouldPauseDirectHelper(
             supportsDirectControl: true,
             isSpotifyPlaybackSuppressed: true,
             isDirectPlaybackActive: true,
@@ -264,6 +264,22 @@ final class SpotifyTests: XCTestCase {
             isDirectPlaybackActive: true,
             isStartingPlayback: false,
             hasPendingItem: false
+        ))
+        XCTAssertTrue(SpotifyStore.shouldResuppressHelperEvent(
+            "playing",
+            isSpotifyPlaybackSuppressed: true
+        ))
+        XCTAssertTrue(SpotifyStore.shouldResuppressHelperEvent(
+            "track_changed",
+            isSpotifyPlaybackSuppressed: true
+        ))
+        XCTAssertFalse(SpotifyStore.shouldResuppressHelperEvent(
+            "paused",
+            isSpotifyPlaybackSuppressed: true
+        ))
+        XCTAssertFalse(SpotifyStore.shouldResuppressHelperEvent(
+            "playing",
+            isSpotifyPlaybackSuppressed: false
         ))
     }
 

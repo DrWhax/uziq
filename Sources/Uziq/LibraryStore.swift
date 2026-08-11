@@ -18,6 +18,7 @@ final class LibraryStore {
     var searchText = ""
     var selectedSection: LibrarySection = .library
     var mostPlayedRange: MostPlayedRange = .week
+    var listeningHistoryRange: MostPlayedRange = .week
     var isScanning = false
     var scanProgress: ScanProgress?
     var scanMessage: String?
@@ -37,18 +38,22 @@ final class LibraryStore {
     var playlists: [PlaylistSummary] = []
     var favoriteTrackIDs: Set<String> = []
     private(set) var recentlyPlayedArtists: [RecentArtistPlay] = []
+    private(set) var recentListeningHistory: [ListeningHistoryItem] = []
+    private(set) var mostPlayedListeningHistory: [ListeningHistoryItem] = []
     private(set) var isInitialLoadComplete = false
 
     @ObservationIgnored private let database = LibraryDatabase()
     @ObservationIgnored private let scanner = LibraryScanner()
     @ObservationIgnored private let bookmarks = BookmarkStore()
     @ObservationIgnored private let matcher = MetadataMatcher(fingerprintProvider: FpcalcFingerprintProvider())
+    @ObservationIgnored private let lyricsClient = LRCLIBClient()
     @ObservationIgnored private var artworkTask: Task<Void, Never>?
     @ObservationIgnored private var artistArtworkTask: Task<Void, Never>?
     @ObservationIgnored private var browseGroupingTask: Task<Void, Never>?
     @ObservationIgnored private var browseGroupingGeneration = UUID()
     @ObservationIgnored private var normalizedArtistArtwork: [String: Data] = [:]
     @ObservationIgnored private var playObserver: NSObjectProtocol?
+    @ObservationIgnored private var lyricsLookupTasks: [String: Task<LocalLyricsLookupResult, Never>] = [:]
 
     init() {
         folderRoots = bookmarks.resolvedURLs()
@@ -74,6 +79,7 @@ final class LibraryStore {
         Task {
             await refresh()
             await loadRecentlyPlayedArtists()
+            await loadListeningHistory()
             await loadFavoriteTrackIDs()
             await loadPlaylists()
             await loadArtistArtwork()
@@ -89,14 +95,54 @@ final class LibraryStore {
 
     deinit {
         browseGroupingTask?.cancel()
+        lyricsLookupTasks.values.forEach { $0.cancel() }
         if let playObserver { NotificationCenter.default.removeObserver(playObserver) }
+    }
+
+    func remoteLyrics(for track: Track) async -> LocalLyricsLookupResult {
+        let query = LRCLIBQuery(track: track)
+        guard query.isUsable else { return .notFound }
+        let key = query.cacheKey
+        if let cached = try? await database.fetchCachedLyrics(key: key),
+           cached.lyrics != nil || cached.isInstrumental || cached.fetchedAt > Date.now.addingTimeInterval(-30 * 24 * 60 * 60) {
+            if let lyrics = cached.lyrics { return .lyrics(lyrics) }
+            return cached.isInstrumental ? .instrumental : .notFound
+        }
+        if let task = lyricsLookupTasks[key] { return await task.value }
+
+        let database = database
+        let client = lyricsClient
+        let task = Task<LocalLyricsLookupResult, Never> {
+            do {
+                let lookup = try await client.lookup(query)
+                try? await database.cacheLyrics(key: key, result: lookup)
+                switch lookup {
+                case .lyrics(let value): return .lyrics(value)
+                case .instrumental: return .instrumental
+                case .notFound: return .notFound
+                }
+            } catch is CancellationError {
+                return .unavailable("Lyrics lookup was cancelled.")
+            } catch let error as LRCLIBError {
+                if case .rateLimited = error {
+                    return .unavailable("LRCLIB is temporarily rate limiting requests. Try again later.")
+                }
+                return .unavailable("LRCLIB lyrics are temporarily unavailable.")
+            } catch {
+                return .unavailable("LRCLIB lyrics could not be loaded right now.")
+            }
+        }
+        lyricsLookupTasks[key] = task
+        let result = await task.value
+        lyricsLookupTasks[key] = nil
+        return result
     }
 
     var displayedTracks: [Track] {
         switch selectedSection {
         case .recentlyAdded:
             return Array(tracks.sorted { $0.addedAt > $1.addedAt }.prefix(100))
-        case .artists, .albums, .genres, .playlists, .mostPlayed, .bandcamp, .spotify, .jellyfin, .library, .settings:
+        case .artists, .albums, .genres, .playlists, .history, .mostPlayed, .bandcamp, .spotify, .jellyfin, .library, .settings:
             return tracks
         }
     }
@@ -371,6 +417,31 @@ final class LibraryStore {
             recentlyPlayedArtists = try await database.fetchRecentlyPlayedArtists(
                 since: Date.now.addingTimeInterval(-7 * 24 * 60 * 60)
             )
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func recordListening(_ event: ListeningHistoryEvent) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await database.recordListeningHistory(event)
+                await loadListeningHistory()
+            } catch {
+                lastError = error.localizedDescription
+            }
+        }
+    }
+
+    func loadListeningHistory() async {
+        do {
+            let recent = try await database.fetchRecentListeningHistory()
+            let mostPlayed = try await database.fetchMostPlayedListeningHistory(
+                since: listeningHistoryRange.startDate
+            )
+            recentListeningHistory = recent
+            mostPlayedListeningHistory = mostPlayed
         } catch {
             lastError = error.localizedDescription
         }

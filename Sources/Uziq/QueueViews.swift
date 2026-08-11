@@ -12,7 +12,18 @@ struct UpNextView: View {
         VStack(spacing: 0) {
             header
             Divider()
+            VSplitView {
+                queuePane
+                    .frame(minHeight: 230, idealHeight: 320)
+                ProviderLyricsView()
+                    .frame(minHeight: 180, idealHeight: 320)
+            }
+        }
+        .background(.bar)
+    }
 
+    private var queuePane: some View {
+        VStack(spacing: 0) {
             if let current = queue.currentItem {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("NOW PLAYING")
@@ -66,7 +77,6 @@ struct UpNextView: View {
             Divider()
             queueControls
         }
-        .background(.bar)
     }
 
     private var header: some View {
@@ -136,6 +146,136 @@ struct UpNextView: View {
         }
         .padding(14)
     }
+}
+
+private struct ProviderLyricsView: View {
+    @Environment(PlaybackQueueStore.self) private var queue
+    @Environment(PlaybackEngine.self) private var playback
+    @Environment(LibraryStore.self) private var library
+    @Environment(SpotifyStore.self) private var spotify
+    @Environment(JellyfinStore.self) private var jellyfin
+    @State private var state: ProviderLyricsState = .idle
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("Lyrics", systemImage: "text.quote")
+                    .font(.headline)
+                Spacer()
+                if case .available(_, let source) = state {
+                    Text(source)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(.quaternary, in: Capsule())
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            ScrollView {
+                Group {
+                    switch state {
+                    case .idle:
+                        lyricsMessage("Choose something to play.", systemImage: "music.note")
+                    case .loading(let provider):
+                        HStack(spacing: 10) {
+                            ProgressView().controlSize(.small)
+                            Text("Loading lyrics from \(provider)…")
+                                .foregroundStyle(.secondary)
+                        }
+                    case .available(let lyrics, _):
+                        Text(lyrics)
+                            .font(.callout)
+                            .lineSpacing(4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    case .unavailable(let message):
+                        lyricsMessage(message, systemImage: "text.quote")
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 100, alignment: .topLeading)
+                .padding(16)
+            }
+        }
+        .task(id: lyricsIdentity) { await loadLyrics() }
+    }
+
+    private func lyricsMessage(_ message: String, systemImage: String) -> some View {
+        Label(message, systemImage: systemImage)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var lyricsIdentity: String {
+        guard let source = queue.currentItem?.source else { return "none" }
+        let trackID = source == .spotify
+            ? spotify.playback?.itemID
+            : playback.currentTrack?.id
+        return "\(source.rawValue):\(trackID ?? queue.currentItem?.sourceID ?? "")"
+    }
+
+    private func loadLyrics() async {
+        guard let source = queue.currentItem?.source else {
+            state = .idle
+            return
+        }
+        switch source {
+        case .local:
+            guard let track = playback.currentTrack else {
+                state = .unavailable("This local track is no longer available.")
+                return
+            }
+            if let lyrics = normalizedLyrics(track.lyrics) {
+                state = .available(lyrics, source: "Embedded")
+                return
+            }
+            state = .loading(provider: "LRCLIB")
+            let result = await library.remoteLyrics(for: track)
+            guard !Task.isCancelled else { return }
+            switch result {
+            case .lyrics(let lyrics):
+                state = .available(lyrics, source: "LRCLIB")
+            case .instrumental:
+                state = .unavailable("LRCLIB identifies this track as instrumental.")
+            case .notFound:
+                state = .unavailable("No embedded or LRCLIB lyrics were found for this track.")
+            case .unavailable(let message):
+                state = .unavailable(message)
+            }
+        case .bandcamp:
+            state = normalizedLyrics(playback.currentTrack?.lyrics)
+                .map { .available($0, source: "Bandcamp") }
+                ?? .unavailable("Bandcamp did not provide lyrics for this track.")
+        case .jellyfin:
+            guard let item = queue.currentItem?.jellyfinItem else {
+                state = .unavailable("This Jellyfin track is no longer available.")
+                return
+            }
+            state = .loading(provider: "Jellyfin")
+            let lyrics = await jellyfin.lyrics(for: item)
+            guard !Task.isCancelled else { return }
+            state = lyrics.map { .available($0, source: "Jellyfin") }
+                ?? .unavailable("Jellyfin has no lyrics for this track.")
+        case .spotify:
+            state = .unavailable("Lyrics aren’t available through Uziq’s Spotify integration.")
+        }
+    }
+
+    private func normalizedLyrics(_ value: String?) -> String? {
+        let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return normalized.isEmpty ? nil : normalized
+    }
+}
+
+private enum ProviderLyricsState: Equatable {
+    case idle
+    case loading(provider: String)
+    case available(String, source: String)
+    case unavailable(String)
 }
 
 private struct QueueItemRow: View {
