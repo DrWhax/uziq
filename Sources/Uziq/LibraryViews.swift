@@ -483,7 +483,9 @@ private struct LibraryBrowsePreparingView: View {
 
 struct AlbumDetailView: View {
     let album: AlbumGroup
+    @Environment(LibraryStore.self) private var library
     @Environment(PlaybackQueueStore.self) private var queue
+    @State private var showingMetadataEditor = false
 
     var body: some View {
         ScrollView {
@@ -504,10 +506,13 @@ struct AlbumDetailView: View {
                         Text("\(album.tracks.count) tracks")
                             .font(.caption)
                             .foregroundStyle(.tertiary)
-                        Button("Play Album") {
-                            if let first = album.tracks.first { queue.replace(with: album.tracks, startingAt: first) }
+                        HStack {
+                            Button("Play Album") {
+                                if let first = album.tracks.first { queue.replace(with: album.tracks, startingAt: first) }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            Button("Edit Metadata…") { showingMetadataEditor = true }
                         }
-                        .buttonStyle(.borderedProminent)
                     }
                 }
                 LazyVStack(spacing: 0) {
@@ -521,6 +526,10 @@ struct AlbumDetailView: View {
             .padding(28)
         }
         .navigationTitle(album.title)
+        .sheet(isPresented: $showingMetadataEditor) {
+            BatchMetadataEditorView(tracks: album.tracks, scope: .album)
+                .environment(library)
+        }
     }
 }
 
@@ -529,6 +538,7 @@ struct ArtistDetailView: View {
     @Environment(LibraryStore.self) private var library
     @Environment(PlaybackQueueStore.self) private var queue
     @State private var selectedAlbum: AlbumGroup?
+    @State private var showingMetadataEditor = false
 
     private let columns = [GridItem(.adaptive(minimum: 150, maximum: 210), spacing: 20)]
 
@@ -547,6 +557,7 @@ struct ArtistDetailView: View {
                                 .font(.system(size: 32, weight: .bold, design: .rounded))
                             Text("\(artist.albums.count) albums · \(artist.tracks.count) tracks")
                                 .foregroundStyle(.secondary)
+                            Button("Edit Artist Metadata…") { showingMetadataEditor = true }
                         }
                     }
                     if let profile = library.artistProfiles[artist.name] {
@@ -601,6 +612,10 @@ struct ArtistDetailView: View {
             await library.loadArtistArtwork()
             library.refreshArtistArtworkIfNeeded()
             library.loadArtistProfile(for: artist.name)
+        }
+        .sheet(isPresented: $showingMetadataEditor) {
+            BatchMetadataEditorView(tracks: artist.tracks, scope: .artist)
+                .environment(library)
         }
     }
 
@@ -729,6 +744,7 @@ struct TrackRow: View {
     @Environment(LibraryStore.self) private var library
     @Environment(PlaybackEngine.self) private var playback
     @Environment(PlaybackQueueStore.self) private var queue
+    @State private var showingMetadataEditor = false
 
     var body: some View {
         Button(action: play) {
@@ -787,8 +803,14 @@ struct TrackRow: View {
                     library.remove(track, from: playlist)
                 }
             }
+            Divider()
+            Button("Edit Metadata…") { showingMetadataEditor = true }
             Button("Identify with AcoustID") { library.identify(track) }
             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([track.url]) }
+        }
+        .sheet(isPresented: $showingMetadataEditor) {
+            TrackMetadataEditorView(track: track)
+                .environment(library)
         }
         if showsDivider { Divider() }
     }

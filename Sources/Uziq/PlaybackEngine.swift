@@ -46,7 +46,7 @@ final class PlaybackEngine {
     var duration = 0.0
     var volume: Float = 1.0 {
         didSet {
-            playerNode.volume = volume
+            applyLocalVolume()
             spotifyPlayerNode.volume = volume
         }
     }
@@ -62,15 +62,35 @@ final class PlaybackEngine {
     }
     var equalizerGains: [Float]
     var equalizerPreset: EqualizerPreset
+    var normalizationEnabled: Bool {
+        didSet {
+            applyLocalVolume()
+            UserDefaults.standard.set(normalizationEnabled, forKey: "normalization-enabled")
+        }
+    }
+    var normalizationPreampDB: Float {
+        didSet {
+            applyLocalVolume()
+            UserDefaults.standard.set(normalizationPreampDB, forKey: "normalization-preamp-db")
+        }
+    }
+    var crossfadeDuration: Double {
+        didSet {
+            UserDefaults.standard.set(crossfadeDuration, forKey: "crossfade-duration")
+        }
+    }
 
     private var currentIndex = 0
 
     @ObservationIgnored private let audioEngine = AVAudioEngine()
-    @ObservationIgnored private let playerNode = AVAudioPlayerNode()
+    @ObservationIgnored private let primaryPlayerNode = AVAudioPlayerNode()
+    @ObservationIgnored private let transitionPlayerNode = AVAudioPlayerNode()
     @ObservationIgnored private let spotifyPlayerNode = AVAudioPlayerNode()
     @ObservationIgnored private let sourceMixer = AVAudioMixerNode()
     @ObservationIgnored private let equalizer = AVAudioUnitEQ(numberOfBands: 10)
     @ObservationIgnored private var audioFile: AVAudioFile?
+    @ObservationIgnored private var prefetchedAudioFile: AVAudioFile?
+    @ObservationIgnored private var prefetchedAudioFileIndex: Int?
     @ObservationIgnored private var startingFrame: AVAudioFramePosition = 0
     @ObservationIgnored private var totalFrames: AVAudioFramePosition = 0
     @ObservationIgnored private var sampleRate = 44_100.0
@@ -93,6 +113,17 @@ final class PlaybackEngine {
     @ObservationIgnored private var spotifyShouldPlay = true
     @ObservationIgnored private var spotifyHasStartedPlayback = false
     @ObservationIgnored private var spotifyIsWaitingForTransition = false
+    @ObservationIgnored private var currentReplayGainDB: Double?
+    @ObservationIgnored private var activeLocalPlayerIndex = 0
+    @ObservationIgnored private var crossfadeTask: Task<Void, Never>?
+
+    private var playerNode: AVAudioPlayerNode {
+        activeLocalPlayerIndex == 0 ? primaryPlayerNode : transitionPlayerNode
+    }
+
+    private var inactivePlayerNode: AVAudioPlayerNode {
+        activeLocalPlayerIndex == 0 ? transitionPlayerNode : primaryPlayerNode
+    }
 
     private let spotifyFramesPerBuffer = 4_096
     private let spotifyPrebufferCount = 4
@@ -106,12 +137,19 @@ final class PlaybackEngine {
             equalizerGains = EqualizerPreset.flat.gains!
         }
         equalizerPreset = EqualizerPreset(rawValue: defaults.string(forKey: "equalizer-preset") ?? "") ?? .flat
+        normalizationEnabled = defaults.bool(forKey: "normalization-enabled")
+        normalizationPreampDB = defaults.object(forKey: "normalization-preamp-db") == nil
+            ? 0
+            : min(12, max(-12, defaults.float(forKey: "normalization-preamp-db")))
+        crossfadeDuration = min(12, max(0, defaults.double(forKey: "crossfade-duration")))
 
-        audioEngine.attach(playerNode)
+        audioEngine.attach(primaryPlayerNode)
+        audioEngine.attach(transitionPlayerNode)
         audioEngine.attach(spotifyPlayerNode)
         audioEngine.attach(sourceMixer)
         audioEngine.attach(equalizer)
-        audioEngine.connect(playerNode, to: sourceMixer, fromBus: 0, toBus: 0, format: nil)
+        audioEngine.connect(primaryPlayerNode, to: sourceMixer, fromBus: 0, toBus: 0, format: nil)
+        audioEngine.connect(transitionPlayerNode, to: sourceMixer, fromBus: 0, toBus: 2, format: nil)
         audioEngine.connect(
             spotifyPlayerNode,
             to: sourceMixer,
@@ -121,7 +159,7 @@ final class PlaybackEngine {
         )
         audioEngine.connect(sourceMixer, to: equalizer, format: nil)
         audioEngine.connect(equalizer, to: audioEngine.mainMixerNode, format: nil)
-        playerNode.volume = volume
+        applyLocalVolume()
         spotifyPlayerNode.volume = volume
         configureEqualizerBands()
         applyEqualizerSettings()
@@ -167,11 +205,13 @@ final class PlaybackEngine {
         progressTimer?.invalidate()
         prefetchTask?.cancel()
         recoveryTask?.cancel()
+        crossfadeTask?.cancel()
         if let toggleObserver { NotificationCenter.default.removeObserver(toggleObserver) }
         if let engineConfigurationObserver { NotificationCenter.default.removeObserver(engineConfigurationObserver) }
         if let sleepObserver { NotificationCenter.default.removeObserver(sleepObserver) }
         if let wakeObserver { NotificationCenter.default.removeObserver(wakeObserver) }
-        playerNode.stop()
+        primaryPlayerNode.stop()
+        transitionPlayerNode.stop()
         spotifyPlayerNode.stop()
         audioEngine.stop()
     }
@@ -192,16 +232,20 @@ final class PlaybackEngine {
     func restore(_ track: Track, at seconds: Double) {
         guard fileExists(track), let file = try? AVAudioFile(forReading: track.url) else { return }
         if isSpotifyPCMActive { endSpotifyPCMStream() }
+        finishCrossfadeImmediately()
         NotificationCenter.default.post(name: .uziqLocalPlaybackStarted, object: nil)
         resetStreamingQueue()
         queue = [track]
         currentIndex = 0
         scheduleGeneration += 1
-        playerNode.stop()
+        primaryPlayerNode.stop()
+        transitionPlayerNode.stop()
         audioFile = file
         sampleRate = file.processingFormat.sampleRate
         totalFrames = file.length
         currentTrack = track
+        currentReplayGainDB = track.replayGainTrackDB ?? track.replayGainAlbumDB
+        applyLocalVolume()
         duration = sampleRate > 0 ? Double(totalFrames) / sampleRate : 0
         let restoredSeconds = min(max(0, seconds.isFinite ? seconds : 0), duration)
         let frame = min(totalFrames, AVAudioFramePosition(restoredSeconds * sampleRate))
@@ -229,6 +273,7 @@ final class PlaybackEngine {
 
     func toggle() {
         guard currentTrack != nil, !isSpotifyPCMActive else { return }
+        finishCrossfadeImmediately()
         if isPlaying {
             playerNode.pause()
             isPlaying = false
@@ -240,6 +285,7 @@ final class PlaybackEngine {
     }
 
     func pause() {
+        finishCrossfadeImmediately()
         playerNode.pause()
         isPlaying = false
     }
@@ -250,6 +296,7 @@ final class PlaybackEngine {
 
     func seek(to seconds: Double) {
         guard let audioFile, !isSpotifyPCMActive else { return }
+        finishCrossfadeImmediately()
         let safeSeconds = seconds.isFinite ? max(0, seconds) : 0
         let value = min(safeSeconds, duration > 0 ? duration : safeSeconds)
         let frame = min(totalFrames, max(0, AVAudioFramePosition(value * sampleRate)))
@@ -286,9 +333,11 @@ final class PlaybackEngine {
 
     func beginSpotifyPCMStream() {
         guard !isSpotifyPCMActive else { return }
+        finishCrossfadeImmediately()
         resetStreamingQueue()
         scheduleGeneration += 1
-        playerNode.stop()
+        primaryPlayerNode.stop()
+        transitionPlayerNode.stop()
         spotifyPlayerNode.stop()
         audioFile = nil
         currentTrack = nil
@@ -436,6 +485,7 @@ final class PlaybackEngine {
 
     private func startTrack(at index: Int) {
         isSpotifyPCMActive = false
+        finishCrossfadeImmediately()
         guard index >= 0, index < queue.count, fileExists(queue[index]) else {
             guard let nextIndex = firstAvailableIndex(startingAt: index + 1) else {
                 stopPlayback(notifyCompletion: true)
@@ -446,15 +496,25 @@ final class PlaybackEngine {
         }
 
         do {
-            let file = try AVAudioFile(forReading: queue[index].url)
+            let file: AVAudioFile
+            if prefetchedAudioFileIndex == index, let prefetchedAudioFile {
+                file = prefetchedAudioFile
+            } else {
+                file = try AVAudioFile(forReading: queue[index].url)
+            }
+            prefetchedAudioFile = nil
+            prefetchedAudioFileIndex = nil
             scheduleGeneration += 1
-            playerNode.stop()
+            primaryPlayerNode.stop()
+            transitionPlayerNode.stop()
             try startAudioEngine()
             audioFile = file
             sampleRate = file.processingFormat.sampleRate
             totalFrames = file.length
             currentIndex = index
             currentTrack = queue[index]
+            currentReplayGainDB = queue[index].replayGainTrackDB ?? queue[index].replayGainAlbumDB
+            applyLocalVolume()
             currentTime = 0
             duration = sampleRate > 0 ? Double(totalFrames) / sampleRate : 0
             schedule(file, from: 0, shouldPlay: true)
@@ -527,8 +587,88 @@ final class PlaybackEngine {
         let playerIsPlaying = playerNode.isPlaying
         if isPlaying != playerIsPlaying { isPlaying = playerIsPlaying }
         if duration > 0, duration - currentTime <= 20 {
+            prefetchNextLocalFileIfNeeded()
             prefetchNextTrackIfNeeded()
         }
+        if crossfadeDuration > 0,
+           nextTrackProvider == nil,
+           duration > 0,
+           duration - currentTime <= crossfadeDuration,
+           queue.indices.contains(currentIndex + 1),
+           crossfadeTask == nil {
+            startCrossfade(to: currentIndex + 1)
+        }
+    }
+
+    private func startCrossfade(to index: Int) {
+        guard queue.indices.contains(index), fileExists(queue[index]) else { return }
+        let nextFile: AVAudioFile
+        if prefetchedAudioFileIndex == index, let prefetchedAudioFile {
+            nextFile = prefetchedAudioFile
+        } else if let opened = try? AVAudioFile(forReading: queue[index].url) {
+            nextFile = opened
+        } else {
+            return
+        }
+
+        let oldNode = playerNode
+        let newNode = inactivePlayerNode
+        let oldVolume = oldNode.volume
+        let nextGain = queue[index].replayGainTrackDB ?? queue[index].replayGainAlbumDB
+        let targetVolume = localVolume(replayGainDB: nextGain)
+        let overlap = max(0.25, min(crossfadeDuration, duration - currentTime))
+
+        scheduleGeneration += 1
+        newNode.stop()
+        newNode.volume = 0
+        activeLocalPlayerIndex = activeLocalPlayerIndex == 0 ? 1 : 0
+        prefetchedAudioFile = nil
+        prefetchedAudioFileIndex = nil
+        audioFile = nextFile
+        sampleRate = nextFile.processingFormat.sampleRate
+        totalFrames = nextFile.length
+        currentIndex = index
+        currentTrack = queue[index]
+        currentReplayGainDB = nextGain
+        currentTime = 0
+        duration = sampleRate > 0 ? Double(totalFrames) / sampleRate : 0
+        schedule(nextFile, from: 0, shouldPlay: false)
+        playerNode.play()
+        isPlaying = playerNode.isPlaying
+        NotificationCenter.default.post(name: .uziqTrackPlayed, object: queue[index].id)
+
+        crossfadeTask = Task { [weak self, weak oldNode, weak newNode] in
+            let steps = max(5, Int(overlap * 20))
+            for step in 1...steps {
+                try? await Task.sleep(for: .milliseconds(50))
+                guard let self, !Task.isCancelled, let oldNode, let newNode else { return }
+                let progress = Float(step) / Float(steps)
+                oldNode.volume = oldVolume * (1 - progress)
+                newNode.volume = targetVolume * progress
+                if step == steps {
+                    oldNode.stop()
+                    newNode.volume = targetVolume
+                    self.crossfadeTask = nil
+                }
+            }
+        }
+    }
+
+    private func finishCrossfadeImmediately() {
+        guard crossfadeTask != nil else { return }
+        crossfadeTask?.cancel()
+        crossfadeTask = nil
+        inactivePlayerNode.stop()
+        playerNode.volume = localVolume(replayGainDB: currentReplayGainDB)
+    }
+
+    private func prefetchNextLocalFileIfNeeded() {
+        let nextIndex = currentIndex + 1
+        guard queue.indices.contains(nextIndex),
+              prefetchedAudioFileIndex != nextIndex,
+              fileExists(queue[nextIndex]) else { return }
+        prefetchedAudioFile = try? AVAudioFile(forReading: queue[nextIndex].url)
+        prefetchedAudioFileIndex = prefetchedAudioFile == nil ? nil : nextIndex
     }
 
     private func waitForNextTrack() {
@@ -578,6 +718,20 @@ final class PlaybackEngine {
         }
     }
 
+    private func applyLocalVolume() {
+        playerNode.volume = localVolume(replayGainDB: currentReplayGainDB)
+    }
+
+    private func localVolume(replayGainDB: Double?) -> Float {
+        guard normalizationEnabled, let replayGainDB else { return volume }
+        let adjustedDB = replayGainDB + Double(normalizationPreampDB)
+        let linearGain = pow(10, adjustedDB / 20)
+        // AVAudioPlayerNode's volume is deliberately kept at or below unity to
+        // avoid clipping. ReplayGain attenuation still aligns normally mastered
+        // albums; unusually quiet tracks are never boosted into distortion.
+        return volume * Float(min(1, max(0, linearGain)))
+    }
+
     private func persistEqualizer() {
         UserDefaults.standard.set(equalizerGains.map(Double.init), forKey: "equalizer-gains")
         UserDefaults.standard.set(equalizerPreset.rawValue, forKey: "equalizer-preset")
@@ -592,6 +746,7 @@ final class PlaybackEngine {
     private func systemWillSleep() {
         isSystemSleeping = true
         recoveryTask?.cancel()
+        finishCrossfadeImmediately()
         guard let currentTrack, !isSpotifyPCMActive else { return }
         trackIDBeforeSleep = currentTrack.id
         positionBeforeSleep = currentTime
@@ -625,6 +780,7 @@ final class PlaybackEngine {
     }
 
     private func audioEngineConfigurationChanged() {
+        finishCrossfadeImmediately()
         guard !isSystemSleeping,
               let currentTrack,
               !isSpotifyPCMActive else { return }
@@ -699,8 +855,12 @@ final class PlaybackEngine {
 
     private func stopPlayback(notifyCompletion: Bool = false) {
         resetStreamingQueue()
+        finishCrossfadeImmediately()
         scheduleGeneration += 1
-        playerNode.stop()
+        primaryPlayerNode.stop()
+        transitionPlayerNode.stop()
+        prefetchedAudioFile = nil
+        prefetchedAudioFileIndex = nil
         audioFile = nil
         currentTrack = nil
         currentTime = 0

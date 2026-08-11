@@ -23,7 +23,7 @@ struct UziqApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("Uziq") {
+        WindowGroup("Uziq", id: "main") {
             ContentView()
                 .environment(library)
                 .environment(playback)
@@ -81,6 +81,20 @@ struct UziqApp: App {
                 Button("Volume Down") { queue.volume = max(0, queue.volume - 0.05) }
             }
         }
+
+        MenuBarExtra {
+            MenuBarPlayerView()
+                .environment(library)
+                .environment(playback)
+                .environment(bandcamp)
+                .environment(spotify)
+                .environment(jellyfin)
+                .environment(queue)
+        } label: {
+            Image(systemName: queue.isPlaying ? "waveform" : "music.note")
+                .accessibilityLabel(queue.isPlaying ? "Uziq is playing" : "Uziq")
+        }
+        .menuBarExtraStyle(.window)
 
         Settings {
             SettingsView()

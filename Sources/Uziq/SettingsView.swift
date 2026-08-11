@@ -97,6 +97,51 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section("Playback normalization") {
+                Toggle("Use ReplayGain when available", isOn: Binding(
+                    get: { playback.normalizationEnabled },
+                    set: { playback.normalizationEnabled = $0 }
+                ))
+                HStack {
+                    Text("Preamp")
+                    Slider(
+                        value: Binding(
+                            get: { Double(playback.normalizationPreampDB) },
+                            set: { playback.normalizationPreampDB = Float($0) }
+                        ),
+                        in: -12...12,
+                        step: 0.5
+                    )
+                    Text(String(format: "%+.1f dB", playback.normalizationPreampDB))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 66, alignment: .trailing)
+                }
+                .disabled(!playback.normalizationEnabled)
+                Text("Uziq reads ReplayGain track or album tags during a rescan and safely attenuates local files to reduce jumps in loudness. Spotify keeps librespot’s own normalization path.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Track transitions") {
+                HStack {
+                    Text("Crossfade")
+                    Slider(
+                        value: Binding(
+                            get: { playback.crossfadeDuration },
+                            set: { playback.crossfadeDuration = $0 }
+                        ),
+                        in: 0...12,
+                        step: 1
+                    )
+                    Text(playback.crossfadeDuration == 0 ? "Off" : "\(Int(playback.crossfadeDuration)) s")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 38, alignment: .trailing)
+                }
+                Text("Crossfade overlaps consecutive local files in the current queue. It is off by default and does not alter Spotify, Bandcamp, or Jellyfin transitions.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Jellyfin") {
                 VStack(alignment: .leading, spacing: 5) {
                     Label("Self-hosted music", systemImage: "server.rack")

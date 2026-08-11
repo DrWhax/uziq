@@ -50,12 +50,13 @@ Uziq also publishes the current title, artist, album, artwork, duration, and pla
 - Persistent security-scoped folder bookmarks
 - Recursive audio scanning
 - SQLite library and full-text search
+- Non-destructive track, album, and artist metadata overrides that survive rescans
 - Embedded metadata, artwork, and lyrics extraction
-- AVAudioEngine playback with queue controls, waveform seeking, and equalization
+- AVAudioEngine playback with continuous local queues, next-file prefetching, optional local crossfade, waveform seeking, equalization, and opt-in ReplayGain normalization
 - Persistent universal queue with Play Next, reordering, shuffle, repeat, and session restoration
-- Unified, replayable listening history with weekly, monthly, and yearly cross-provider charts
+- Unified, replayable listening history with weekly, monthly, and yearly cross-provider charts and history-powered smart mixes
 - Provider-aware lyrics from local metadata, cached and timestamp-synchronized LRCLIB lookups, Bandcamp, and connected Jellyfin servers
-- macOS Now Playing and Control Center metadata, seeking, and transport controls
+- macOS Now Playing and Control Center metadata, seeking, transport controls, and a compact SwiftUI menu-bar player
 - Privacy-conscious diagnostics report export with a small rotating event log
 - Bandcamp search, subscriptions, streaming, fan collection, wishlist, followed-artist feed, and expiring caches
 - Spotify PKCE login, personal library, catalog search, and playback through Uziq's locally controlled librespot helper

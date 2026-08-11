@@ -88,6 +88,29 @@ struct ListeningHistoryItem: Identifiable, Hashable, Sendable {
     var id: String { itemKey }
 }
 
+enum SmartMixKind: String, Sendable {
+    case rotation
+    case rediscover
+    case acrossUziq
+
+    var systemImage: String {
+        switch self {
+        case .rotation: "repeat.circle.fill"
+        case .rediscover: "sparkles"
+        case .acrossUziq: "square.grid.2x2.fill"
+        }
+    }
+}
+
+struct SmartMix: Identifiable, Hashable, Sendable {
+    let kind: SmartMixKind
+    let title: String
+    let subtitle: String
+    let items: [ListeningHistoryItem]
+
+    var id: String { kind.rawValue }
+}
+
 enum MostPlayedRange: String, CaseIterable, Identifiable {
     case week
     case month
@@ -137,6 +160,8 @@ struct Track: Identifiable, Hashable, Sendable {
     let codec: String
     let bitrate: Int?
     let sampleRate: Double?
+    var replayGainTrackDB: Double? = nil
+    var replayGainAlbumDB: Double? = nil
     let artworkData: Data?
     let lyrics: String?
     let musicBrainzRecordingID: String?
@@ -181,6 +206,8 @@ struct TrackMetadata: Sendable {
     let codec: String
     let bitrate: Int?
     let sampleRate: Double?
+    var replayGainTrackDB: Double? = nil
+    var replayGainAlbumDB: Double? = nil
     let artworkData: Data?
     let lyrics: String?
     let musicBrainzRecordingID: String?
@@ -195,6 +222,27 @@ struct CachedLyrics: Sendable, Equatable {
     let syncedLyrics: String?
     let isInstrumental: Bool
     let fetchedAt: Date
+}
+
+struct MetadataOverrideChanges: Sendable {
+    var title: String?
+    var artist: String?
+    var albumArtist: String?
+    var album: String?
+    var genre: String?
+    var year: String?
+    var trackNumber: Int?
+    var discNumber: Int?
+    var overridesTrackNumber = false
+    var overridesDiscNumber = false
+    var artworkData: Data?
+    var overridesArtwork = false
+
+    var isEmpty: Bool {
+        title == nil && artist == nil && albumArtist == nil && album == nil &&
+            genre == nil && year == nil && !overridesTrackNumber &&
+            !overridesDiscNumber && !overridesArtwork
+    }
 }
 
 struct PlaylistSummary: Identifiable, Hashable, Sendable {

@@ -12,7 +12,21 @@ actor LibraryDatabase {
     private let databaseURL: URL
     private let initializationError: String?
 
-    nonisolated static let currentSchemaVersion = 7
+    nonisolated static let currentSchemaVersion = 9
+
+    private nonisolated static let effectiveTrackColumns = """
+        t.id, t.path, t.file_name,
+        COALESCE(o.title, t.title), COALESCE(o.artist, t.artist),
+        COALESCE(o.album_artist, t.album_artist), COALESCE(o.album, t.album),
+        COALESCE(o.genre, t.genre), COALESCE(o.year, t.year),
+        CASE WHEN o.track_number_overridden = 1 THEN o.track_number ELSE t.track_number END,
+        CASE WHEN o.disc_number_overridden = 1 THEN o.disc_number ELSE t.disc_number END,
+        t.duration, t.codec, t.bitrate, t.sample_rate,
+        t.replay_gain_track, t.replay_gain_album,
+        CASE WHEN o.artwork_overridden = 1 THEN o.artwork ELSE t.artwork END,
+        t.lyrics, t.mb_recording_id, t.mb_release_id, t.acoustid,
+        t.added_at, t.modified_at, t.file_size, t.is_favorite
+        """
 
     init(databaseURL: URL? = nil) {
         let url: URL
@@ -81,15 +95,18 @@ actor LibraryDatabase {
         INSERT INTO tracks (
             id, path, file_name, title, artist, album_artist, album, genre, year,
             track_number, disc_number, duration, codec, bitrate, sample_rate,
+            replay_gain_track, replay_gain_album,
             artwork, lyrics, mb_recording_id, mb_release_id, acoustid,
             added_at, modified_at, file_size
-        ) VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(path) DO UPDATE SET
             file_name=excluded.file_name, title=excluded.title, artist=excluded.artist,
             album_artist=excluded.album_artist, album=excluded.album, genre=excluded.genre,
             year=excluded.year, track_number=excluded.track_number, disc_number=excluded.disc_number,
             duration=excluded.duration, codec=excluded.codec, bitrate=excluded.bitrate,
-            sample_rate=excluded.sample_rate, artwork=COALESCE(excluded.artwork, tracks.artwork),
+            sample_rate=excluded.sample_rate, replay_gain_track=excluded.replay_gain_track,
+            replay_gain_album=excluded.replay_gain_album,
+            artwork=COALESCE(excluded.artwork, tracks.artwork),
             lyrics=excluded.lyrics, mb_recording_id=excluded.mb_recording_id,
             mb_release_id=excluded.mb_release_id, acoustid=excluded.acoustid,
             modified_at=excluded.modified_at, file_size=excluded.file_size
@@ -110,14 +127,16 @@ actor LibraryDatabase {
         bind(metadata.codec, to: statement, index: 12)
         bind(metadata.bitrate, to: statement, index: 13)
         bind(metadata.sampleRate, to: statement, index: 14)
-        bind(metadata.artworkData, to: statement, index: 15)
-        bind(metadata.lyrics, to: statement, index: 16)
-        bind(metadata.musicBrainzRecordingID, to: statement, index: 17)
-        bind(metadata.musicBrainzReleaseID, to: statement, index: 18)
-        bind(metadata.acoustID, to: statement, index: 19)
-        bind(Date.now.timeIntervalSince1970, to: statement, index: 20)
-        bind(metadata.modifiedAt.timeIntervalSince1970, to: statement, index: 21)
-        bind(metadata.fileSize, to: statement, index: 22)
+        bind(metadata.replayGainTrackDB, to: statement, index: 15)
+        bind(metadata.replayGainAlbumDB, to: statement, index: 16)
+        bind(metadata.artworkData, to: statement, index: 17)
+        bind(metadata.lyrics, to: statement, index: 18)
+        bind(metadata.musicBrainzRecordingID, to: statement, index: 19)
+        bind(metadata.musicBrainzReleaseID, to: statement, index: 20)
+        bind(metadata.acoustID, to: statement, index: 21)
+        bind(Date.now.timeIntervalSince1970, to: statement, index: 22)
+        bind(metadata.modifiedAt.timeIntervalSince1970, to: statement, index: 23)
+        bind(metadata.fileSize, to: statement, index: 24)
         try step(statement)
 
         let id = try scalarString("SELECT id FROM tracks WHERE path = ?", bindings: [metadata.url.path])
@@ -131,8 +150,8 @@ actor LibraryDatabase {
         mostPlayedSince: Date? = nil
     ) throws -> [Track] {
         var sql = mostPlayedSince == nil
-            ? "SELECT t.* FROM tracks t"
-            : "SELECT t.*, COUNT(ph.id) AS play_count FROM tracks t JOIN play_history ph ON ph.track_id = t.id"
+            ? "SELECT \(Self.effectiveTrackColumns) FROM tracks t LEFT JOIN track_metadata_overrides o ON o.track_id = t.id"
+            : "SELECT \(Self.effectiveTrackColumns), COUNT(ph.id) AS play_count FROM tracks t LEFT JOIN track_metadata_overrides o ON o.track_id = t.id JOIN play_history ph ON ph.track_id = t.id"
         var bindings: [String] = []
         var conditions: [String] = []
         if let search, !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -150,11 +169,13 @@ actor LibraryDatabase {
         }
         if !conditions.isEmpty { sql += " WHERE " + conditions.joined(separator: " AND ") }
         if mostPlayedSince != nil {
-            sql += " GROUP BY t.id ORDER BY COUNT(ph.id) DESC, t.title COLLATE NOCASE"
+            sql += " GROUP BY t.id ORDER BY COUNT(ph.id) DESC, COALESCE(o.title, t.title) COLLATE NOCASE"
         } else if recentlyAdded {
             sql += " ORDER BY t.added_at DESC"
         } else {
-            sql += " ORDER BY t.album COLLATE NOCASE, t.track_number, t.title COLLATE NOCASE"
+            sql += " ORDER BY COALESCE(o.album, t.album) COLLATE NOCASE, "
+                + "CASE WHEN o.track_number_overridden = 1 THEN o.track_number ELSE t.track_number END, "
+                + "COALESCE(o.title, t.title) COLLATE NOCASE"
         }
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
@@ -164,7 +185,7 @@ actor LibraryDatabase {
         while sqlite3_step(statement) == SQLITE_ROW {
             tracks.append(readTrack(
                 statement,
-                playCountIndex: mostPlayedSince == nil ? nil : 24,
+                playCountIndex: mostPlayedSince == nil ? nil : 26,
                 artworkPool: &artworkPool
             ))
         }
@@ -186,12 +207,13 @@ actor LibraryDatabase {
 
     func fetchRecentlyPlayedArtists(since: Date, limit: Int = 16) throws -> [RecentArtistPlay] {
         let statement = try prepare("""
-            SELECT t.artist, COUNT(ph.id), MAX(ph.played_at)
+            SELECT COALESCE(o.artist, t.artist) AS effective_artist, COUNT(ph.id), MAX(ph.played_at)
             FROM play_history ph
             JOIN tracks t ON t.id = ph.track_id
-            WHERE ph.played_at >= ? AND TRIM(t.artist) <> ''
-            GROUP BY t.artist COLLATE NOCASE
-            ORDER BY MAX(ph.played_at) DESC, COUNT(ph.id) DESC, t.artist COLLATE NOCASE
+            LEFT JOIN track_metadata_overrides o ON o.track_id = t.id
+            WHERE ph.played_at >= ? AND TRIM(COALESCE(o.artist, t.artist)) <> ''
+            GROUP BY effective_artist COLLATE NOCASE
+            ORDER BY MAX(ph.played_at) DESC, COUNT(ph.id) DESC, effective_artist COLLATE NOCASE
             LIMIT ?
             """)
         defer { sqlite3_finalize(statement) }
@@ -287,6 +309,36 @@ actor LibraryDatabase {
         return readListeningHistory(statement)
     }
 
+    func fetchRediscoveryListeningHistory(
+        notPlayedSince cutoff: Date,
+        limit: Int = 100
+    ) throws -> [ListeningHistoryItem] {
+        let statement = try prepare("""
+            SELECT h.item_key, h.source, h.source_id, h.title, h.artist, h.album,
+                   h.artwork_url, h.queue_item, totals.last_played, totals.play_count,
+                   t.path
+            FROM (
+                SELECT item_key, COUNT(*) AS play_count, MAX(played_at) AS last_played
+                FROM listening_history
+                GROUP BY item_key
+                HAVING MAX(played_at) < ?
+            ) totals
+            JOIN listening_history h ON h.id = (
+                SELECT latest.id FROM listening_history latest
+                WHERE latest.item_key = totals.item_key
+                ORDER BY latest.played_at DESC, latest.id DESC
+                LIMIT 1
+            )
+            LEFT JOIN tracks t ON h.source = 'local' AND t.id = h.source_id
+            ORDER BY totals.play_count DESC, totals.last_played ASC, h.title COLLATE NOCASE
+            LIMIT ?
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(cutoff.timeIntervalSince1970, to: statement, index: 1)
+        bind(max(1, limit), to: statement, index: 2)
+        return readListeningHistory(statement)
+    }
+
     func fetchArtistArtwork() throws -> [String: Data] {
         let statement = try prepare("SELECT artist, artwork FROM artist_artwork")
         defer { sqlite3_finalize(statement) }
@@ -311,6 +363,13 @@ actor LibraryDatabase {
         bind(artworkData, to: statement, index: 2)
         bind(Date.now.timeIntervalSince1970, to: statement, index: 3)
         try step(statement)
+    }
+
+    func removeArtistArtwork(artist: String) throws {
+        try withTransaction {
+            try execute("DELETE FROM artist_artwork WHERE artist = ?", bindings: [artist])
+            try execute("DELETE FROM artist_artwork_attempts WHERE artist = ?", bindings: [artist])
+        }
     }
 
     func fetchArtistProfiles() throws -> [String: ArtistProfile] {
@@ -419,6 +478,71 @@ actor LibraryDatabase {
         try step(statement)
     }
 
+    func applyMetadataOverrides(trackIDs: [String], changes: MetadataOverrideChanges) throws {
+        guard !trackIDs.isEmpty, !changes.isEmpty else { return }
+        try withTransaction {
+            for trackID in trackIDs {
+                try execute(
+                    "INSERT OR IGNORE INTO track_metadata_overrides(track_id, updated_at) VALUES (?, ?)",
+                    bindings: [trackID, String(Date.now.timeIntervalSince1970)]
+                )
+                let statement = try prepare("""
+                    UPDATE track_metadata_overrides SET
+                        title = CASE WHEN ? = 1 THEN ? ELSE title END,
+                        artist = CASE WHEN ? = 1 THEN ? ELSE artist END,
+                        album_artist = CASE WHEN ? = 1 THEN ? ELSE album_artist END,
+                        album = CASE WHEN ? = 1 THEN ? ELSE album END,
+                        genre = CASE WHEN ? = 1 THEN ? ELSE genre END,
+                        year = CASE WHEN ? = 1 THEN ? ELSE year END,
+                        track_number = CASE WHEN ? = 1 THEN ? ELSE track_number END,
+                        track_number_overridden = CASE WHEN ? = 1 THEN 1 ELSE track_number_overridden END,
+                        disc_number = CASE WHEN ? = 1 THEN ? ELSE disc_number END,
+                        disc_number_overridden = CASE WHEN ? = 1 THEN 1 ELSE disc_number_overridden END,
+                        artwork = CASE WHEN ? = 1 THEN ? ELSE artwork END,
+                        artwork_overridden = CASE WHEN ? = 1 THEN 1 ELSE artwork_overridden END,
+                        updated_at = ?
+                    WHERE track_id = ?
+                    """)
+                var index: Int32 = 1
+                bindOverride(changes.title, to: statement, index: &index)
+                bindOverride(changes.artist, to: statement, index: &index)
+                bindOverride(changes.albumArtist, to: statement, index: &index)
+                bindOverride(changes.album, to: statement, index: &index)
+                bindOverride(changes.genre, to: statement, index: &index)
+                bindOverride(changes.year, to: statement, index: &index)
+                bind(changes.overridesTrackNumber ? Int64(1) : Int64(0), to: statement, index: index); index += 1
+                bind(changes.trackNumber, to: statement, index: index); index += 1
+                bind(changes.overridesTrackNumber ? Int64(1) : Int64(0), to: statement, index: index); index += 1
+                bind(changes.overridesDiscNumber ? Int64(1) : Int64(0), to: statement, index: index); index += 1
+                bind(changes.discNumber, to: statement, index: index); index += 1
+                bind(changes.overridesDiscNumber ? Int64(1) : Int64(0), to: statement, index: index); index += 1
+                bind(changes.overridesArtwork ? Int64(1) : Int64(0), to: statement, index: index); index += 1
+                bind(changes.artworkData, to: statement, index: index); index += 1
+                bind(changes.overridesArtwork ? Int64(1) : Int64(0), to: statement, index: index); index += 1
+                bind(Date.now.timeIntervalSince1970, to: statement, index: index); index += 1
+                bind(trackID, to: statement, index: index)
+                let updateResult = sqlite3_step(statement)
+                guard updateResult == SQLITE_DONE else {
+                    let message = errorMessage
+                    sqlite3_finalize(statement)
+                    throw UziqError.database(message)
+                }
+                sqlite3_finalize(statement)
+                try rebuildSearchIndex(for: trackID)
+            }
+        }
+    }
+
+    func clearMetadataOverrides(trackIDs: [String]) throws {
+        guard !trackIDs.isEmpty else { return }
+        try withTransaction {
+            for trackID in trackIDs {
+                try execute("DELETE FROM track_metadata_overrides WHERE track_id = ?", bindings: [trackID])
+                try rebuildSearchIndex(for: trackID)
+            }
+        }
+    }
+
     func fetchCachedLyrics(key: String) throws -> CachedLyrics? {
         let statement = try prepare("SELECT lyrics, synced_lyrics, is_instrumental, fetched_at FROM lyrics_cache WHERE lookup_key = ?")
         defer { sqlite3_finalize(statement) }
@@ -509,7 +633,8 @@ actor LibraryDatabase {
 
     func fetchPlaylistTracks(playlistID: String) throws -> [Track] {
         let statement = try prepare("""
-            SELECT t.* FROM tracks t
+            SELECT \(Self.effectiveTrackColumns) FROM tracks t
+            LEFT JOIN track_metadata_overrides o ON o.track_id = t.id
             JOIN playlist_tracks pt ON pt.track_id = t.id
             WHERE pt.playlist_id = ?
             ORDER BY pt.position, t.title COLLATE NOCASE
@@ -642,6 +767,8 @@ actor LibraryDatabase {
             if existingVersion < 5 { try migrateListeningHistorySchema(connection) }
             if existingVersion < 6 { try migrateLyricsCacheSchema(connection) }
             if existingVersion < 7 { try migrateSyncedLyricsCacheSchema(connection) }
+            if existingVersion < 8 { try migrateMetadataOverridesSchema(connection) }
+            if existingVersion < 9 { try migrateReplayGainSchema(connection) }
 
             // Older development builds created tables without recording a schema
             // version. These checks make that migration safe and idempotent.
@@ -718,6 +845,15 @@ actor LibraryDatabase {
             album_key TEXT PRIMARY KEY, attempted_at REAL NOT NULL
         );
         """)
+    }
+
+    private nonisolated static func migrateReplayGainSchema(_ connection: OpaquePointer) throws {
+        if !tableContainsColumn(on: connection, table: "tracks", column: "replay_gain_track") {
+            try executeRaw(connection, "ALTER TABLE tracks ADD COLUMN replay_gain_track REAL")
+        }
+        if !tableContainsColumn(on: connection, table: "tracks", column: "replay_gain_album") {
+            try executeRaw(connection, "ALTER TABLE tracks ADD COLUMN replay_gain_album REAL")
+        }
     }
 
     private nonisolated static func migrateSearchSchema(_ connection: OpaquePointer) throws {
@@ -804,6 +940,28 @@ actor LibraryDatabase {
         }
     }
 
+    private nonisolated static func migrateMetadataOverridesSchema(_ connection: OpaquePointer) throws {
+        try executeRaw(connection, """
+        CREATE TABLE IF NOT EXISTS track_metadata_overrides (
+            track_id TEXT PRIMARY KEY,
+            title TEXT,
+            artist TEXT,
+            album_artist TEXT,
+            album TEXT,
+            genre TEXT,
+            year TEXT,
+            track_number INTEGER,
+            track_number_overridden INTEGER NOT NULL DEFAULT 0,
+            disc_number INTEGER,
+            disc_number_overridden INTEGER NOT NULL DEFAULT 0,
+            artwork BLOB,
+            artwork_overridden INTEGER NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL,
+            FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+        );
+        """)
+    }
+
     private nonisolated static func executeRaw(_ connection: OpaquePointer, _ sql: String) throws {
         var errorPointer: UnsafeMutablePointer<CChar>?
         let result = sqlite3_exec(connection, sql, nil, nil, &errorPointer)
@@ -879,8 +1037,20 @@ actor LibraryDatabase {
         try execute("DELETE FROM tracks_fts WHERE track_id = ?", bindings: [id])
         try execute("""
             INSERT INTO tracks_fts(track_id, file_name, title, artist, album, album_artist, genre)
-            SELECT id, file_name, title, artist, album, album_artist, genre FROM tracks WHERE id = ?
+            SELECT t.id, t.file_name, COALESCE(o.title, t.title), COALESCE(o.artist, t.artist),
+                   COALESCE(o.album, t.album), COALESCE(o.album_artist, t.album_artist),
+                   COALESCE(o.genre, t.genre)
+            FROM tracks t
+            LEFT JOIN track_metadata_overrides o ON o.track_id = t.id
+            WHERE t.id = ?
         """, bindings: [id])
+    }
+
+    private func bindOverride(_ value: String?, to statement: OpaquePointer, index: inout Int32) {
+        bind(value == nil ? Int64(0) : Int64(1), to: statement, index: index)
+        index += 1
+        bind(value, to: statement, index: index)
+        index += 1
     }
 
     private func readTrack(
@@ -907,11 +1077,13 @@ actor LibraryDatabase {
             id: text(0), url: URL(fileURLWithPath: text(1)), fileName: text(2), title: text(3),
             artist: text(4), albumArtist: text(5), album: text(6), genre: text(7), year: text(8),
             trackNumber: optionalInt(9), discNumber: optionalInt(10), duration: sqlite3_column_double(statement, 11),
-            codec: text(12), bitrate: optionalInt(13), sampleRate: optionalDouble(14), artworkData: artworkData(15),
-            lyrics: optionalText(16), musicBrainzRecordingID: optionalText(17), musicBrainzReleaseID: optionalText(18),
-            acoustID: optionalText(19), addedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 20)),
-            modifiedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 21)),
-            isFavorite: sqlite3_column_int(statement, 23) != 0,
+            codec: text(12), bitrate: optionalInt(13), sampleRate: optionalDouble(14),
+            replayGainTrackDB: optionalDouble(15), replayGainAlbumDB: optionalDouble(16),
+            artworkData: artworkData(17), lyrics: optionalText(18),
+            musicBrainzRecordingID: optionalText(19), musicBrainzReleaseID: optionalText(20),
+            acoustID: optionalText(21), addedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 22)),
+            modifiedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 23)),
+            isFavorite: sqlite3_column_int(statement, 25) != 0,
             playCount: playCountIndex.map { Int(sqlite3_column_int(statement, $0)) } ?? 0
         )
     }

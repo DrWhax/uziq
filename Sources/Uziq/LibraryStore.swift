@@ -40,6 +40,7 @@ final class LibraryStore {
     private(set) var recentlyPlayedArtists: [RecentArtistPlay] = []
     private(set) var recentListeningHistory: [ListeningHistoryItem] = []
     private(set) var mostPlayedListeningHistory: [ListeningHistoryItem] = []
+    private(set) var smartMixes: [SmartMix] = []
     private(set) var isInitialLoadComplete = false
 
     @ObservationIgnored private let database = LibraryDatabase()
@@ -138,6 +139,57 @@ final class LibraryStore {
         let result = await task.value
         lyricsLookupTasks[key] = nil
         return result
+    }
+
+    @discardableResult
+    func applyMetadataOverrides(trackIDs: [String], changes: MetadataOverrideChanges) async -> Bool {
+        do {
+            try await database.applyMetadataOverrides(trackIDs: trackIDs, changes: changes)
+            await refresh()
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    func clearMetadataOverrides(trackIDs: [String]) async -> Bool {
+        do {
+            try await database.clearMetadataOverrides(trackIDs: trackIDs)
+            await refresh()
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    func overrideArtistArtwork(artist: String, artworkData: Data) async -> Bool {
+        do {
+            try await database.updateArtistArtwork(artist: artist, artworkData: artworkData)
+            artistArtwork[artist] = artworkData
+            normalizedArtistArtwork[Self.normalizedArtistName(artist)] = artworkData
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    func clearArtistArtworkOverride(artist: String) async -> Bool {
+        do {
+            try await database.removeArtistArtwork(artist: artist)
+            artistArtwork[artist] = nil
+            normalizedArtistArtwork[Self.normalizedArtistName(artist)] = nil
+            startArtistArtworkEnrichment(forceRetry: true)
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
     }
 
     var displayedTracks: [Track] {
@@ -438,15 +490,71 @@ final class LibraryStore {
 
     func loadListeningHistory() async {
         do {
-            let recent = try await database.fetchRecentListeningHistory()
-            let mostPlayed = try await database.fetchMostPlayedListeningHistory(
+            async let recentRequest = database.fetchRecentListeningHistory(limit: 60)
+            async let mostPlayedRequest = database.fetchMostPlayedListeningHistory(
                 since: listeningHistoryRange.startDate
+            )
+            async let rediscoveryRequest = database.fetchRediscoveryListeningHistory(
+                notPlayedSince: Date.now.addingTimeInterval(-45 * 24 * 60 * 60),
+                limit: 60
+            )
+            let (recent, mostPlayed, rediscovery) = try await (
+                recentRequest,
+                mostPlayedRequest,
+                rediscoveryRequest
             )
             recentListeningHistory = recent
             mostPlayedListeningHistory = mostPlayed
+            smartMixes = Self.makeSmartMixes(
+                recent: recent,
+                mostPlayed: mostPlayed,
+                rediscovery: rediscovery
+            )
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    private static func makeSmartMixes(
+        recent: [ListeningHistoryItem],
+        mostPlayed: [ListeningHistoryItem],
+        rediscovery: [ListeningHistoryItem]
+    ) -> [SmartMix] {
+        var mixes: [SmartMix] = []
+        if !mostPlayed.isEmpty {
+            mixes.append(SmartMix(
+                kind: .rotation,
+                title: "Heavy Rotation",
+                subtitle: "The tracks you keep coming back to",
+                items: Array(mostPlayed.prefix(50))
+            ))
+        }
+        if !rediscovery.isEmpty {
+            mixes.append(SmartMix(
+                kind: .rediscover,
+                title: "Rediscover",
+                subtitle: "Old favorites absent for at least 45 days",
+                items: Array(rediscovery.prefix(50))
+            ))
+        }
+
+        let grouped = Dictionary(grouping: recent, by: \.source)
+        var blended: [ListeningHistoryItem] = []
+        for offset in 0..<15 {
+            for source in PlaybackSource.allCases {
+                guard let candidates = grouped[source], candidates.indices.contains(offset) else { continue }
+                blended.append(candidates[offset])
+            }
+        }
+        if Set(blended.map(\.source)).count > 1 {
+            mixes.append(SmartMix(
+                kind: .acrossUziq,
+                title: "Across Uziq",
+                subtitle: "A round-robin mix of your connected sources",
+                items: blended
+            ))
+        }
+        return mixes
     }
 
     func artistGroup(named name: String) -> ArtistGroup? {

@@ -33,6 +33,9 @@ struct ListeningHistoryView: View {
                     )
                     .frame(maxWidth: .infinity, minHeight: 360)
                 } else {
+                    if !library.smartMixes.isEmpty {
+                        smartMixes
+                    }
                     recentCarousel
 
                     VStack(alignment: .leading, spacing: 12) {
@@ -60,6 +63,33 @@ struct ListeningHistoryView: View {
         .task { await library.loadListeningHistory() }
         .onChange(of: library.listeningHistoryRange) { _, _ in
             Task { await library.loadListeningHistory() }
+        }
+    }
+
+    private var smartMixes: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Made From Your Listening")
+                .font(.title2.weight(.bold))
+            Text("These mixes update as you listen and work across every provider.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 14)], spacing: 14) {
+                ForEach(library.smartMixes) { mix in
+                    Button {
+                        queue.replace(with: mix.items.map(\.queueItem))
+                    } label: {
+                        SmartMixCard(mix: mix)
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("Play Mix") { queue.replace(with: mix.items.map(\.queueItem)) }
+                        Button("Shuffle Mix") {
+                            queue.replace(with: mix.items.shuffled().map(\.queueItem))
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -91,6 +121,50 @@ struct ListeningHistoryView: View {
             .padding(.horizontal, -28)
             .frame(height: 224)
         }
+    }
+}
+
+private struct SmartMixCard: View {
+    let mix: SmartMix
+
+    private var colors: [Color] {
+        switch mix.kind {
+        case .rotation: [.pink, .purple]
+        case .rediscover: [.orange, .pink]
+        case .acrossUziq: [.blue, .indigo]
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 15) {
+            ZStack {
+                LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+                Image(systemName: mix.kind.systemImage)
+                    .font(.system(size: 31, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 76, height: 76)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(mix.title)
+                    .font(.headline)
+                Text(mix.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Text("\(mix.items.count) tracks")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 4)
+            Image(systemName: "play.circle.fill")
+                .font(.title2)
+                .foregroundStyle(.tint)
+        }
+        .padding(13)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 

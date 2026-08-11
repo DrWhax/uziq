@@ -231,7 +231,9 @@ final class PlaybackQueueStore {
             queue: .main
         ) { [weak self] notification in
             guard let trackID = notification.object as? String else { return }
-            Task { @MainActor [weak self] in self?.recordEnginePlayback(trackID: trackID) }
+            Task { @MainActor [weak self] in
+                self?.engineStartedTrack(trackID: trackID)
+            }
         }
         persistTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.timerFired() }
@@ -332,6 +334,17 @@ final class PlaybackQueueStore {
         cancelRandomPlayback()
         items = [item]
         currentIndex = 0
+        restoredPosition = 0
+        dispatchCurrent()
+    }
+
+    func replace(with queueItems: [UnifiedQueueItem], startingAt item: UnifiedQueueItem? = nil) {
+        guard !queueItems.isEmpty else { return }
+        cancelRandomPlayback()
+        items = queueItems
+        currentIndex = item.flatMap { selected in
+            queueItems.firstIndex { $0.id == selected.id }
+        } ?? 0
         restoredPosition = 0
         dispatchCurrent()
     }
@@ -744,7 +757,7 @@ final class PlaybackQueueStore {
                 DispatchQueue.main.async { [weak self] in self?.next() }
                 return
             }
-            playback?.play(track)
+            playback?.play(track, in: localPlaybackRun(startingAt: currentIndex))
             if restoredPosition > 0 { playback?.seek(to: restoredPosition) }
         case .bandcamp:
             jellyfin?.cancelPendingPlayback()
@@ -780,6 +793,32 @@ final class PlaybackQueueStore {
     private func advanceAfterCompletion() {
         guard !isDispatching else { return }
         next()
+    }
+
+    private func localPlaybackRun(startingAt index: Int?) -> [Track] {
+        guard shuffleEnabled == false,
+              repeatMode != .one,
+              let index,
+              items.indices.contains(index) else {
+            return currentItem.flatMap(localTrack(for:)).map { [$0] } ?? []
+        }
+        var tracks: [Track] = []
+        for item in items[index...] {
+            guard item.source == .local, let track = localTrack(for: item) else { break }
+            tracks.append(track)
+        }
+        return tracks
+    }
+
+    private func engineStartedTrack(trackID: String) {
+        if playback?.queue.count ?? 0 > 1,
+           let index = items.firstIndex(where: { $0.source == .local && $0.sourceID == trackID }) {
+            currentIndex = index
+            restoredPosition = 0
+            persistSession()
+            updateNowPlaying(force: true)
+        }
+        recordEnginePlayback(trackID: trackID)
     }
 
     func resolveRestoredSession() {

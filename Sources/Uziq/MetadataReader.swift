@@ -54,6 +54,8 @@ struct MetadataReader: Sendable {
         let sampleRate = format?.processingFormat.sampleRate
         let codec = url.pathExtension.uppercased()
         let bitrate = format.map { Int(formatBitrate($0)) }
+        let replayGainTrackDB = decibelTag(fallback, keys: ["REPLAYGAIN_TRACK_GAIN"])
+        let replayGainAlbumDB = decibelTag(fallback, keys: ["REPLAYGAIN_ALBUM_GAIN"])
 
         return TrackMetadata(
             url: url,
@@ -70,6 +72,8 @@ struct MetadataReader: Sendable {
             codec: codec,
             bitrate: bitrate,
             sampleRate: sampleRate,
+            replayGainTrackDB: replayGainTrackDB,
+            replayGainAlbumDB: replayGainAlbumDB,
             artworkData: artwork,
             lyrics: lyrics,
             musicBrainzRecordingID: recordingID,
@@ -132,6 +136,15 @@ struct MetadataReader: Sendable {
     private static func integerTag(_ tags: [String: String], keys: [String]) -> Int? {
         guard let value = fallbackValue(tags, keys: keys) else { return nil }
         return Int(value.split(separator: "/").first ?? "")
+    }
+
+    private static func decibelTag(_ tags: [String: String], keys: [String]) -> Double? {
+        guard let value = fallbackValue(tags, keys: keys) else { return nil }
+        let number = value
+            .replacingOccurrences(of: "dB", with: "", options: [.caseInsensitive])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let gain = Double(number), gain.isFinite else { return nil }
+        return min(30, max(-30, gain))
     }
 
     /// AVFoundation can open FLAC audio but does not consistently expose Vorbis

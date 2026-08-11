@@ -209,6 +209,64 @@ final class LibraryDatabaseTests: XCTestCase {
         XCTAssertTrue(remainingPlaylistTracks.isEmpty)
     }
 
+    func testMetadataOverridesDriveSearchPlaylistsAndSurviveRescanUntilReverted() async throws {
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let path = "/tmp/uziq-overrides/song.mp3"
+        try await database.upsert(makeMetadata(path: path, title: "File Title"))
+        let originalTracks = try await database.fetchTracks()
+        let original = try XCTUnwrap(originalTracks.first)
+        let artwork = Data([0x10, 0x20, 0x30])
+
+        try await database.applyMetadataOverrides(
+            trackIDs: [original.id],
+            changes: MetadataOverrideChanges(
+                title: "Corrected Title",
+                artist: "Corrected Performer",
+                albumArtist: "Corrected Performer",
+                album: "Merged Album",
+                genre: "Dream Pop",
+                year: "2025",
+                trackNumber: 7,
+                discNumber: nil,
+                overridesTrackNumber: true,
+                overridesDiscNumber: true,
+                artworkData: artwork,
+                overridesArtwork: true
+            )
+        )
+
+        let correctedSearchResults = try await database.fetchTracks(search: "Corrected Performer")
+        var corrected = try XCTUnwrap(correctedSearchResults.first)
+        XCTAssertEqual(corrected.title, "Corrected Title")
+        XCTAssertEqual(corrected.album, "Merged Album")
+        XCTAssertEqual(corrected.genre, "Dream Pop")
+        XCTAssertEqual(corrected.year, "2025")
+        XCTAssertEqual(corrected.trackNumber, 7)
+        XCTAssertNil(corrected.discNumber)
+        XCTAssertEqual(corrected.artworkData, artwork)
+
+        let playlist = try await database.createPlaylist(name: "Corrected")
+        try await database.addTrack(trackID: original.id, toPlaylist: playlist.id)
+        let playlistTracks = try await database.fetchPlaylistTracks(playlistID: playlist.id)
+        let playlistTrack = try XCTUnwrap(playlistTracks.first)
+        XCTAssertEqual(playlistTrack.artist, "Corrected Performer")
+
+        try await database.upsert(makeMetadata(path: path, title: "Rescanned File Title"))
+        let rescannedTracks = try await database.fetchTracks()
+        corrected = try XCTUnwrap(rescannedTracks.first)
+        XCTAssertEqual(corrected.title, "Corrected Title")
+        XCTAssertEqual(corrected.artist, "Corrected Performer")
+
+        try await database.clearMetadataOverrides(trackIDs: [original.id])
+        let revertedTracks = try await database.fetchTracks()
+        let reverted = try XCTUnwrap(revertedTracks.first)
+        XCTAssertEqual(reverted.title, "Rescanned File Title")
+        XCTAssertEqual(reverted.artist, "Batch Artist")
+        XCTAssertNil(reverted.artworkData)
+        let staleSearchResults = try await database.fetchTracks(search: "Corrected Performer")
+        XCTAssertTrue(staleSearchResults.isEmpty)
+    }
+
     func testExternalTrackPlayIsIgnoredByLocalHistory() async throws {
         let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
         let metadata = makeMetadata(path: "/tmp/uziq-local-counterpart.mp3", title: "Shared Song")
@@ -221,6 +279,20 @@ final class LibraryDatabaseTests: XCTestCase {
 
         XCTAssertFalse(recorded)
         XCTAssertTrue(mostPlayed.isEmpty)
+    }
+
+    func testReplayGainValuesPersistThroughLibraryDatabase() async throws {
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+        var metadata = makeMetadata(path: "/tmp/uziq-replaygain.flac", title: "Normalized")
+        metadata.replayGainTrackDB = -8.75
+        metadata.replayGainAlbumDB = -7.5
+
+        try await database.upsert(metadata)
+        let tracks = try await database.fetchTracks()
+        let track = try XCTUnwrap(tracks.first)
+
+        XCTAssertEqual(track.replayGainTrackDB, -8.75)
+        XCTAssertEqual(track.replayGainAlbumDB, -7.5)
     }
 
     func testUnifiedListeningHistoryGroupsProvidersAndRoundTripsReplayItems() async throws {
@@ -286,7 +358,9 @@ final class LibraryDatabaseTests: XCTestCase {
             "ALBUM=Tagged Album",
             "album_artist=Tagged Artist",
             "GENRE=Ambient",
-            "track=2/8"
+            "track=2/8",
+            "REPLAYGAIN_TRACK_GAIN=-7.25 dB",
+            "REPLAYGAIN_ALBUM_GAIN=-6.5 dB"
         ]
         var block = Data()
         let vendor = Data("test-vendor".utf8)
@@ -331,6 +405,8 @@ final class LibraryDatabaseTests: XCTestCase {
         XCTAssertEqual(metadata.album, "Tagged Album")
         XCTAssertEqual(metadata.genre, "Ambient")
         XCTAssertEqual(metadata.trackNumber, 2)
+        XCTAssertEqual(metadata.replayGainTrackDB, -7.25)
+        XCTAssertEqual(metadata.replayGainAlbumDB, -6.5)
         XCTAssertEqual(metadata.artworkData, artwork)
         XCTAssertEqual(metadata.codec, "FLAC")
     }
