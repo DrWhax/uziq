@@ -248,9 +248,10 @@ private struct ProviderLyricsView: View {
             guard !Task.isCancelled else { return }
             switch result {
             case .lyrics(let lyrics):
+                let presentation = LyricsPresentation(plain: lyrics.plain, synced: lyrics.synced)
                 state = .available(
-                    LyricsPresentation(plain: lyrics.plain, synced: lyrics.synced),
-                    source: "LRCLIB"
+                    presentation,
+                    source: presentation.timedLines.isEmpty ? "LRCLIB · Plain" : "LRCLIB · Synced"
                 )
             case .instrumental:
                 state = .unavailable("LRCLIB identifies this track as instrumental.")

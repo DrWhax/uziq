@@ -73,6 +73,7 @@ actor LRCLIBClient {
             throw LRCLIBError.rateLimited(until: rateLimitedUntil)
         }
 
+        var exactFallback: LRCLIBLookup?
         if !query.album.isEmpty, query.duration.isFinite, query.duration > 0 {
             let exact = try await request(
                 path: "/api/get",
@@ -86,7 +87,9 @@ actor LRCLIBClient {
             )
             switch exact {
             case .value(let record):
-                return Self.lookup(from: record)
+                let lookup = Self.lookup(from: record)
+                if lookup.hasSynchronizedLyrics { return lookup }
+                exactFallback = lookup
             case .notFound:
                 break
             }
@@ -106,9 +109,10 @@ actor LRCLIBClient {
         )
         guard case .value(let records) = search,
               let record = Self.bestRecord(in: records, for: query) else {
-            return .notFound
+            return exactFallback ?? .notFound
         }
-        return Self.lookup(from: record)
+        let searchResult = Self.lookup(from: record)
+        return searchResult.hasSynchronizedLyrics ? searchResult : (exactFallback ?? searchResult)
     }
 
     private func request<Value: Decodable>(
@@ -177,6 +181,7 @@ actor LRCLIBClient {
                 if difference <= 2 { score += 30 }
                 else if difference <= 5 { score += 15 }
             }
+            if normalized(record.syncedLyrics) != nil { score += 40 }
             return (record, score)
         }
         .max { $0.1 < $1.1 }?.0
@@ -191,6 +196,13 @@ actor LRCLIBClient {
         guard let value = response.value(forHTTPHeaderField: "Retry-After") else { return nil }
         if let seconds = TimeInterval(value) { return .now.addingTimeInterval(seconds) }
         return HTTPDateFormatter.shared.date(from: value)
+    }
+}
+
+private extension LRCLIBLookup {
+    var hasSynchronizedLyrics: Bool {
+        guard case .lyrics(let payload) = self else { return false }
+        return payload.synced?.isEmpty == false
     }
 }
 

@@ -20,7 +20,8 @@ final class LRCLIBClientTests: XCTestCase {
                   "plainLyrics": "First line\\nSecond line",
                   "syncedLyrics": null
                 }
-                """)
+                """),
+            .init(statusCode: 200, body: "[]")
         ]
         let client = LRCLIBClient(session: makeSession())
 
@@ -41,6 +42,37 @@ final class LRCLIBClientTests: XCTestCase {
         XCTAssertEqual(components.queryItems?.first(where: { $0.name == "track_name" })?.value, "A Song")
         XCTAssertEqual(components.queryItems?.first(where: { $0.name == "duration" })?.value, "183")
         XCTAssertTrue(request.value(forHTTPHeaderField: "User-Agent")?.hasPrefix("Uziq/") == true)
+        XCTAssertEqual(LRCLIBURLProtocolStub.requests.map { $0.url?.path }, ["/api/get", "/api/search"])
+    }
+
+    func testExactSynchronizedResultDoesNotMakeASecondRequest() async throws {
+        LRCLIBURLProtocolStub.responses = [
+            .init(statusCode: 200, body: """
+                {
+                  "trackName": "A Song",
+                  "artistName": "An Artist",
+                  "albumName": "An Album",
+                  "duration": 183.2,
+                  "instrumental": false,
+                  "plainLyrics": "First line",
+                  "syncedLyrics": "[00:01.00]First line"
+                }
+                """)
+        ]
+        let client = LRCLIBClient(session: makeSession())
+
+        let result = try await client.lookup(.init(
+            title: "A Song",
+            artist: "An Artist",
+            album: "An Album",
+            duration: 183.2
+        ))
+
+        XCTAssertEqual(result, .lyrics(LyricsPayload(
+            plain: "First line",
+            synced: "[00:01.00]First line"
+        )))
+        XCTAssertEqual(LRCLIBURLProtocolStub.requests.map { $0.url?.path }, ["/api/get"])
     }
 
     func testMissingExactMatchFallsBackToSearchAndPreservesSyncedTimestamps() async throws {
