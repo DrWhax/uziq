@@ -243,6 +243,7 @@ private struct SpotifyBrowseView: View {
             .padding(.horizontal, 28)
             .padding(.bottom, 30)
         }
+        .rememberBrowsePosition("spotify-home")
     }
 
     private var hasSearchResults: Bool {
@@ -449,14 +450,16 @@ private struct SpotifyResultRow: View {
                 Button("Add to Queue") { queue.add(item) }
             }
         }
+        PlaybackIssueActions(source: .spotify, sourceID: item.id)
     }
 }
 
 private struct SpotifyArtistDetail: View {
+    @Environment(LibraryStore.self) private var library
     @Environment(SpotifyStore.self) private var spotify
     @Environment(PlaybackQueueStore.self) private var queue
     let artist: SpotifyCatalogItem
-    @State private var section: SpotifyArtistPageSection = .albums
+    private var section: SpotifyArtistPageSection { library.browsing.spotifyArtistSections[artist.id] ?? .albums }
 
     private let albumColumns = [
         GridItem(.adaptive(minimum: 150, maximum: 210), spacing: 18)
@@ -502,7 +505,7 @@ private struct SpotifyArtistDetail: View {
                     }
                 }
 
-                Picker("Artist page", selection: $section) {
+                Picker("Artist page", selection: Binding(get: { section }, set: { library.browsing.spotifyArtistSections[artist.id] = $0 })) {
                     ForEach(SpotifyArtistPageSection.allCases) { section in
                         Text(section.title).tag(section)
                     }
@@ -522,6 +525,7 @@ private struct SpotifyArtistDetail: View {
             .padding(.horizontal, 28)
             .padding(.bottom, 32)
         }
+        .rememberBrowsePosition("spotify-artist-\(artist.id)-\(section.rawValue)")
     }
 
     @ViewBuilder private var albums: some View {
@@ -728,6 +732,7 @@ private struct SpotifyAlbumDetail: View {
             .padding(.horizontal, 28)
             .padding(.bottom, 32)
         }
+        .rememberBrowsePosition("spotify-album-\(album.id)")
     }
 
     private var albumTrackSummary: String {
@@ -806,10 +811,12 @@ private struct SpotifyPlaylistDetail: View {
             .padding(.horizontal, 28)
             .padding(.bottom, 30)
         }
+        .rememberBrowsePosition("spotify-playlist-\(playlist.id)")
     }
 }
 
 private struct SpotifyPlaybackNotice: View {
+    @Environment(PlaybackQueueStore.self) private var queue
     @Environment(SpotifyStore.self) private var spotify
     @Environment(PlaybackEngine.self) private var playback
 
@@ -820,10 +827,16 @@ private struct SpotifyPlaybackNotice: View {
                 .foregroundStyle(.secondary)
         }
         if let error = spotify.error {
-            Label(error, systemImage: "exclamationmark.triangle")
-                .font(.callout)
-                .foregroundStyle(.orange)
-                .textSelection(.enabled)
+            HStack {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .textSelection(.enabled)
+                if spotify.playbackRecoveryError != nil {
+                    Button("Retry") { queue.retrySpotifyPlayback() }
+                        .disabled(spotify.isStartingPlayback)
+                }
+            }
         }
         if let audioError = playback.spotifyAudioError {
             Label(audioError, systemImage: "speaker.slash")

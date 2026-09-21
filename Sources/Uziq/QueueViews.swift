@@ -136,6 +136,11 @@ struct UpNextView: View {
             .help(queue.repeatMode.title)
 
             Spacer()
+            Button { queue.undoQueueChange() } label: {
+                Label("Undo Queue Change", systemImage: "arrow.uturn.backward")
+            }
+            .disabled(!queue.canUndoQueueChange)
+            .help("Restore the previous queue; changed playback returns paused")
             ReplayTrackButton()
             RandomPlaybackMenu()
         }
@@ -412,6 +417,7 @@ private struct QueueItemRow: View {
             }
         }
         .padding(.vertical, 3)
+        PlaybackIssueActions(source: item.source, sourceID: item.sourceID)
     }
 
     @ViewBuilder private var queueArtwork: some View {

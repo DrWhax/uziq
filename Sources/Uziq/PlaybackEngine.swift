@@ -61,6 +61,7 @@ final class PlaybackEngine {
     private(set) var isSpotifyPCMActive = false
     private(set) var spotifyReceivedByteCount = 0
     private(set) var spotifyAudioError: String?
+    var onTrackFailure: ((Track, String) -> Void)?
     var equalizerEnabled: Bool {
         didSet {
             applyEqualizerSettings()
@@ -618,11 +619,12 @@ final class PlaybackEngine {
                 NotificationCenter.default.post(name: .uziqTrackPlayed, object: queue[index].id)
             }
         } catch {
+            onTrackFailure?(queue[index], "Could not decode or play this file: \(error.localizedDescription)")
             guard let nextIndex = firstAvailableIndex(startingAt: index + 1) else {
                 if nextTrackProvider != nil {
                     waitForNextTrack()
                 } else {
-                    stopPlayback(notifyCompletion: true)
+                    stopPlayback(notifyCompletion: onTrackFailure == nil)
                 }
                 return
             }

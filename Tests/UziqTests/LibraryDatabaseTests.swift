@@ -3,6 +3,75 @@ import SQLite3
 @testable import Uziq
 
 final class LibraryDatabaseTests: XCTestCase {
+    func testLocateCanRecoverATrackAlreadyRemovedByFolderReconciliation() async throws {
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let url = URL(fileURLWithPath: "/tmp/found-again.flac")
+        let metadata = makeMetadata(path: url.path, title: "Recovered")
+        try await database.relocateTrack(id: "old-queue-id", to: url, recoveredMetadata: metadata)
+        let recovered = try await database.fetchTracks(search: "Recovered")
+        XCTAssertEqual(recovered.count, 1)
+        XCTAssertEqual(recovered.first?.id, "old-queue-id")
+        XCTAssertEqual(recovered.first?.url, url)
+        do {
+            try await database.relocateTrack(id: "another-id", to: url, recoveredMetadata: metadata)
+            XCTFail("Recovery must not take over another track")
+        } catch { }
+        let unchanged = try await database.fetchTracks()
+        XCTAssertEqual(unchanged.map(\.id), ["old-queue-id"])
+    }
+
+    @MainActor
+    func testCorruptAudioReportsFailureWithoutTriggeringRepeatCompletion() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("corrupt-\(UUID()).flac")
+        try Data("not an audio file".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+        try await database.upsert(makeMetadata(path: url.path, title: "Corrupt"))
+        let tracks = try await database.fetchTracks()
+        let track = try XCTUnwrap(tracks.first)
+        let engine = PlaybackEngine()
+        var failure: String?
+        engine.onTrackFailure = { failedTrack, message in
+            XCTAssertEqual(failedTrack.id, track.id)
+            failure = message
+        }
+        let unexpectedCompletion = expectation(description: "A failed decode must not advance a repeating queue")
+        unexpectedCompletion.isInverted = true
+        let observer = NotificationCenter.default.addObserver(forName: .uziqPlaybackItemFinished, object: nil, queue: .main) { _ in
+            unexpectedCompletion.fulfill()
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        engine.play(track)
+        XCTAssertNotNil(failure)
+        XCTAssertFalse(engine.isPlaying)
+        await fulfillment(of: [unexpectedCompletion], timeout: 0.1)
+    }
+
+    func testRelocationPreservesTrackIdentityAndRejectsDuplicatePaths() async throws {
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+        try await database.upsertBatch([
+            makeMetadata(path: "/tmp/original.flac", title: "Original"),
+            makeMetadata(path: "/tmp/occupied.flac", title: "Occupied")
+        ])
+        let originalTracks = try await database.fetchTracks()
+        let track = try XCTUnwrap(originalTracks.first(where: { $0.title == "Original" }))
+        try await database.toggleFavorite(trackID: track.id)
+        _ = try await database.recordPlay(trackID: track.id)
+        try await database.relocateTrack(id: track.id, to: URL(fileURLWithPath: "/tmp/relocated.flac"))
+        let tracks = try await database.fetchTracks(search: "relocated")
+        XCTAssertEqual(tracks.first?.id, track.id)
+        XCTAssertEqual(tracks.first?.title, "Original")
+        XCTAssertEqual(tracks.first?.isFavorite, true)
+        do {
+            try await database.relocateTrack(id: track.id, to: URL(fileURLWithPath: "/tmp/occupied.flac"))
+            XCTFail("Must not overwrite another track's path")
+        } catch { }
+        let afterConflict = try await database.fetchTracks(search: "relocated")
+        XCTAssertEqual(afterConflict.first?.id, track.id)
+        let history = try await database.fetchTracks(mostPlayedSince: Date.now.addingTimeInterval(-60))
+        XCTAssertEqual(history.first?.playCount, 1)
+    }
+
     func testLibrarySnapshotKeepsSearchAndMetadataConsistentDuringWrites() async throws {
         let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
         let before = makeMetadata(path: "/tmp/changing.flac", title: "Before")

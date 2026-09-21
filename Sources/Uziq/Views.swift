@@ -59,10 +59,12 @@ struct ContentView: View {
                 SidebarView()
             } detail: {
                 LibraryContentView()
+                    .id(library.selectedSection)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Divider()
+            PlaybackRecoveryBar()
             MiniPlayerView(
                 onOpen: { showingNowPlaying = true },
                 onOpenQueue: { toggleInspector(.queue) },
@@ -383,7 +385,7 @@ struct LibraryContentView: View {
                 SpotifyLibraryView()
             } else if library.selectedSection == .jellyfin {
                 JellyfinLibraryView()
-            } else if library.tracks.isEmpty &&
+            } else if library.allTracks.isEmpty &&
                         library.selectedSection != .library &&
                         library.selectedSection != .recentlyAdded &&
                         library.selectedSection != .mostPlayed {

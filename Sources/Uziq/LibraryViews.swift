@@ -6,11 +6,10 @@ import UniformTypeIdentifiers
 struct TrackListView: View {
     @Environment(LibraryStore.self) private var library
     @Environment(PlaybackQueueStore.self) private var queue
-    @State private var selectedArtist: ArtistGroup?
 
     var body: some View {
         @Bindable var library = library
-        NavigationStack {
+        NavigationStack(path: library.browsing.path(for: library.selectedSection)) {
             VStack(spacing: 0) {
                 HStack(alignment: .lastTextBaseline) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -45,7 +44,7 @@ struct TrackListView: View {
                         if library.selectedSection == .library && library.searchText.isEmpty && !recentArtistCards.isEmpty {
                             RecentlyPlayedArtistsCarousel(
                                 artists: recentArtistCards,
-                                onSelect: { selectedArtist = $0 }
+                                onSelect: { library.browsing.paths[library.selectedSection, default: NavigationPath()].append(LocalBrowseRoute.artist($0.id)) }
                             )
                             .padding(.top, 22)
                             .padding(.bottom, 18)
@@ -91,10 +90,9 @@ struct TrackListView: View {
                     }
                     .padding(.horizontal, 28)
                 }
+                .rememberBrowsePosition("tracks-\(library.selectedSection.rawValue)")
             }
-            .navigationDestination(item: $selectedArtist) { artist in
-                ArtistDetailView(artist: artist)
-            }
+            .localBrowseDestinations(library: library)
             .task(id: library.searchText) {
                 guard library.selectedSection == .library else { return }
                 try? await Task.sleep(for: .milliseconds(220))
@@ -298,18 +296,17 @@ struct ArtistArtworkProgressView: View {
 
 struct AlbumsLibraryView: View {
     @Environment(LibraryStore.self) private var library
-    @State private var selectedAlbum: AlbumGroup?
-    @State private var filterText = ""
+    private var filterText: String { library.browsing.filters[.albums] ?? "" }
 
     private let columns = [GridItem(.adaptive(minimum: 170, maximum: 230), spacing: 24)]
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: library.browsing.path(for: .albums)) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 22) {
                     HStack(alignment: .bottom, spacing: 20) {
                         LibraryHeading(title: "Albums", subtitle: albumSubtitle)
-                        LibraryFilterField(prompt: "Filter albums", text: $filterText)
+                        LibraryFilterField(prompt: "Filter albums", text: library.browsing.filter(for: .albums))
                     }
                     if albums.isEmpty && library.isPreparingBrowseSnapshot {
                         LibraryBrowsePreparingView(label: "Organizing albums…")
@@ -319,7 +316,7 @@ struct AlbumsLibraryView: View {
                     } else {
                         LazyVGrid(columns: columns, alignment: .leading, spacing: 24) {
                             ForEach(albums) { album in
-                                Button { selectedAlbum = album } label: {
+                                NavigationLink(value: LocalBrowseRoute.album(album.id)) {
                                     AlbumCard(album: album)
                                 }
                                 .buttonStyle(.plain)
@@ -329,9 +326,8 @@ struct AlbumsLibraryView: View {
                 }
                 .padding(28)
             }
-            .navigationDestination(item: $selectedAlbum) { album in
-                AlbumDetailView(album: album)
-            }
+            .rememberBrowsePosition("albums")
+            .localBrowseDestinations(library: library)
         }
     }
 
@@ -353,15 +349,15 @@ struct AlbumsLibraryView: View {
 
 struct ArtistsLibraryView: View {
     @Environment(LibraryStore.self) private var library
-    @State private var filterText = ""
+    private var filterText: String { library.browsing.filters[.artists] ?? "" }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: library.browsing.path(for: .artists)) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 22) {
                     HStack(alignment: .bottom, spacing: 20) {
                         LibraryHeading(title: "Artists", subtitle: artistSubtitle)
-                        LibraryFilterField(prompt: "Filter artists", text: $filterText)
+                        LibraryFilterField(prompt: "Filter artists", text: library.browsing.filter(for: .artists))
                     }
                     if artistSections.isEmpty && library.isPreparingBrowseSnapshot {
                         LibraryBrowsePreparingView(label: "Organizing artists…")
@@ -379,9 +375,7 @@ struct ArtistsLibraryView: View {
                                     spacing: 10
                                 ) {
                                     ForEach(section.artists) { artist in
-                                        NavigationLink {
-                                            ArtistDetailView(artist: artist)
-                                        } label: {
+                                        NavigationLink(value: LocalBrowseRoute.artist(artist.id)) {
                                             ArtistRow(artist: artist, showDivider: false)
                                                 .padding(.horizontal, 12)
                                                 .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
@@ -395,6 +389,8 @@ struct ArtistsLibraryView: View {
                 }
                 .padding(28)
             }
+            .rememberBrowsePosition("artists")
+            .localBrowseDestinations(library: library)
             .task {
                 if library.artistArtwork.isEmpty { await library.loadArtistArtwork() }
                 library.refreshArtistArtworkIfNeeded()
@@ -424,10 +420,9 @@ struct ArtistsLibraryView: View {
 
 struct GenresLibraryView: View {
     @Environment(LibraryStore.self) private var library
-    @State private var selectedAlbum: AlbumGroup?
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: library.browsing.path(for: .genres)) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 28) {
                     LibraryHeading(title: "Genres", subtitle: "\(genres.count) genres")
@@ -446,7 +441,7 @@ struct GenresLibraryView: View {
                                 ScrollView(.horizontal, showsIndicators: false) {
                                     LazyHStack(alignment: .top, spacing: 18) {
                                         ForEach(genre.albums) { album in
-                                            Button { selectedAlbum = album } label: {
+                                            NavigationLink(value: LocalBrowseRoute.album(album.id)) {
                                                 AlbumCard(album: album, width: 132, compact: true)
                                             }
                                             .buttonStyle(.plain)
@@ -460,9 +455,8 @@ struct GenresLibraryView: View {
                 }
                 .padding(28)
             }
-            .navigationDestination(item: $selectedAlbum) { album in
-                AlbumDetailView(album: album)
-            }
+            .rememberBrowsePosition("genres")
+            .localBrowseDestinations(library: library)
         }
     }
 
@@ -526,6 +520,7 @@ struct AlbumDetailView: View {
             .padding(28)
         }
         .navigationTitle(album.title)
+        .rememberBrowsePosition("album-\(album.id)")
         .sheet(isPresented: $showingMetadataEditor) {
             BatchMetadataEditorView(tracks: album.tracks, scope: .album)
                 .environment(library)
@@ -537,7 +532,6 @@ struct ArtistDetailView: View {
     let artist: ArtistGroup
     @Environment(LibraryStore.self) private var library
     @Environment(PlaybackQueueStore.self) private var queue
-    @State private var selectedAlbum: AlbumGroup?
     @State private var showingMetadataEditor = false
 
     private let columns = [GridItem(.adaptive(minimum: 150, maximum: 210), spacing: 20)]
@@ -584,7 +578,7 @@ struct ArtistDetailView: View {
                         .font(.title2.weight(.bold))
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 20) {
                         ForEach(artist.albums) { album in
-                            Button { selectedAlbum = album } label: {
+                            NavigationLink(value: LocalBrowseRoute.album(album.id)) {
                                 AlbumCard(album: album, width: 150)
                             }
                             .buttonStyle(.plain)
@@ -603,9 +597,7 @@ struct ArtistDetailView: View {
                 }
                 .padding(28)
             }
-            .navigationDestination(item: $selectedAlbum) { album in
-                AlbumDetailView(album: album)
-            }
+            .rememberBrowsePosition("artist-\(artist.id)")
         }
         .navigationTitle(artist.name)
         .task(id: artist.name) {
@@ -813,6 +805,7 @@ struct TrackRow: View {
             TrackMetadataEditorView(track: track)
                 .environment(library)
         }
+        PlaybackIssueActions(source: .local, sourceID: track.id)
         if showsDivider { Divider() }
     }
 

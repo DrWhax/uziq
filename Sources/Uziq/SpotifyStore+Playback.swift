@@ -28,6 +28,8 @@ extension SpotifyStore {
     }
 
     func suppressForNonSpotifyPlayback() {
+        helperStartupTimeout?.cancel()
+        playbackRecoveryError = nil
         let pauseDirectHelper = Self.shouldPauseDirectHelper(
             supportsDirectControl: librespot.supportsDirectControl,
             isSpotifyPlaybackSuppressed: isSpotifyPlaybackSuppressed,
@@ -110,6 +112,7 @@ extension SpotifyStore {
         playbackEngine?.endSpotifyPCMStream()
         guard unexpected, !isSpotifyPlaybackSuppressed else { return }
         error = "\(message) Press Play to restart it."
+        playbackRecoveryError = error
         if shouldRecover, librespot.canResumePlayback {
             attemptedHelperRecovery = true
             resume()
@@ -285,6 +288,18 @@ extension SpotifyStore {
         playback?.isPlaying == true ? pause() : resume()
     }
 
+    func retryPlayback() {
+        guard !isStartingPlayback else { return }
+        attemptedHelperRecovery = false
+        if librespot.canResumePlayback, !isSpotifyPlaybackSuppressed {
+            resume()
+        } else if let helperPendingItem {
+            play(helperPendingItem)
+        } else {
+            error = "Select a Spotify track to restart playback."
+        }
+    }
+
     func pause() {
         if librespot.isDirectPlaybackActive, !isSpotifyPlaybackSuppressed, librespot.pause() {
             updateHelperPlayback(position: playback?.effectiveProgress(at: .now), isPlaying: false)
@@ -301,11 +316,14 @@ extension SpotifyStore {
             }
             if librespot.recoverPlayback(trackURI: trackURI, position: playback?.progress ?? 0) {
                 error = nil
+                playbackRecoveryError = nil
                 isStartingPlayback = true
                 playbackMessage = "Restarting the Spotify playback engine…"
                 _ = librespot.setVolume(desiredVolume)
+                scheduleHelperStartupTimeout()
             } else {
                 error = "Select a Spotify track to restart playback."
+                playbackRecoveryError = error
             }
             return
         }
@@ -451,6 +469,7 @@ extension SpotifyStore {
                 playbackMessage = nil
                 if case .failure(let error) = completion {
                     handleAPIError(error, prefix: "Spotify could not start playback")
+                    playbackRecoveryError = self.error
                 }
             } receiveValue: { [weak self] in
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
@@ -537,6 +556,7 @@ extension SpotifyStore {
     ) -> Bool {
         guard librespot.supportsDirectControl, let playbackEngine else { return false }
         attemptedHelperRecovery = false
+        playbackRecoveryError = nil
         isSpotifyPlaybackSuppressed = false
         playbackEngine.stopForExternalSpotifyPlayback()
         playbackGeneration = UUID()
@@ -567,7 +587,22 @@ extension SpotifyStore {
             return false
         }
         _ = librespot.setVolume(desiredVolume)
+        scheduleHelperStartupTimeout()
         return true
+    }
+
+    private func scheduleHelperStartupTimeout() {
+        helperStartupTimeout?.cancel()
+        let generation = playbackGeneration
+        helperStartupTimeout = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(30)) } catch { return }
+            guard let self, playbackGeneration == generation,
+                  isStartingPlayback, !isSpotifyPlaybackSuppressed else { return }
+            isStartingPlayback = false
+            playbackMessage = nil
+            error = "Spotify did not finish connecting. Check your connection and retry."
+            playbackRecoveryError = error
+        }
     }
 
     func handleLibrespotEvent(_ event: LibrespotIPCEvent) {
@@ -614,6 +649,8 @@ extension SpotifyStore {
                 isPlaying: false
             )
         case "playing":
+            playbackRecoveryError = nil
+            error = nil
             isStartingPlayback = false
             playbackMessage = nil
             updateHelperPlayback(
@@ -644,11 +681,13 @@ extension SpotifyStore {
             isStartingPlayback = false
             playbackMessage = nil
             error = "Spotify skipped a track that the Uziq helper could not stream."
+            playbackRecoveryError = error
             advanceAfterHelperTrackCompletion()
         case "error":
             isStartingPlayback = false
             playbackMessage = nil
             if let message = event.message { error = message }
+            playbackRecoveryError = error
         default:
             break
         }

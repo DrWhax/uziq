@@ -150,6 +150,81 @@ private struct PlaybackSession: Codable {
 @MainActor
 @Observable
 final class PlaybackQueueStore {
+    private struct QueueUndoSnapshot {
+        let items: [UnifiedQueueItem]
+        let currentIndex: Int?
+        let position: Double
+    }
+    private var undoSnapshot: QueueUndoSnapshot?
+    var canUndoQueueChange: Bool { undoSnapshot != nil }
+    private(set) var trackIssues: [String: TrackPlaybackIssue] = [:]
+    @ObservationIgnored private var dispatchGeneration = UUID()
+
+    func issue(source: PlaybackSource, id: String) -> TrackPlaybackIssue? {
+        trackIssues["\(source.rawValue):\(id)"]
+    }
+
+    func reportIssue(_ message: String, for item: UnifiedQueueItem, missingFile: Bool = false) {
+        trackIssues["\(item.source.rawValue):\(item.sourceID)"] = TrackPlaybackIssue(item: item, message: message, missingFile: missingFile)
+    }
+
+    func retry(_ item: UnifiedQueueItem) {
+        cancelRandomPlayback()
+        if let index = items.firstIndex(where: { $0.id == item.id }) {
+            currentIndex = index
+            restoredPosition = 0
+            dispatchCurrent()
+        } else {
+            replace(with: item)
+        }
+    }
+
+    func retrySpotifyPlayback() {
+        guard let item = currentItem, item.source == .spotify,
+              spotify?.isStartingPlayback != true else { return }
+        if spotify?.librespot.canResumePlayback == true,
+           spotify?.librespot.isDirectPlaybackActive == false {
+            spotify?.retryPlayback()
+        } else {
+            retry(item)
+        }
+    }
+
+    func locate(_ item: UnifiedQueueItem, at url: URL) async {
+        guard item.source == .local, let library else { return }
+        do {
+            try await library.relocateTrack(id: item.sourceID, to: url)
+            trackIssues.removeValue(forKey: "local:\(item.sourceID)")
+        } catch {
+            reportIssue("Could not use this file: \(error.localizedDescription)", for: item, missingFile: true)
+        }
+    }
+
+    private func rememberQueueForUndo() {
+        guard !items.isEmpty else { return }
+        undoSnapshot = QueueUndoSnapshot(items: items, currentIndex: currentIndex, position: currentTime)
+    }
+
+    func undoQueueChange() {
+        guard let snapshot = undoSnapshot else { return }
+        cancelRandomPlayback()
+        let sameCurrentItem = currentItem?.id == snapshot.currentIndex.flatMap { snapshot.items.indices.contains($0) ? snapshot.items[$0].id : nil }
+        if !sameCurrentItem {
+            dispatchGeneration = UUID()
+            bandcamp?.cancelPendingPlayback()
+            jellyfin?.cancelPendingPlayback()
+            spotify?.suppressForNonSpotifyPlayback()
+            playback?.stop()
+        }
+        items = snapshot.items
+        currentIndex = snapshot.currentIndex
+        if !sameCurrentItem { restoredPosition = snapshot.position }
+        undoSnapshot = nil
+        error = nil
+        if !sameCurrentItem { resolveRestoredSession() }
+        persistSession()
+        updateNowPlaying(force: true)
+    }
     nonisolated static func shouldDelegateSpotifySequenceToHelper(
         currentItem: UnifiedQueueItem?,
         helperControlsPlaybackSequence: Bool
@@ -275,6 +350,12 @@ final class PlaybackQueueStore {
         self.bandcamp = bandcamp
         self.spotify = spotify
         self.jellyfin = jellyfin
+        playback.onTrackFailure = { [weak self] track, message in
+            guard let self else { return }
+            let item = items.first(where: { $0.source == .local && $0.sourceID == track.id })
+                ?? currentItem
+            if let item { reportIssue(message, for: item) }
+        }
         playback.volume = volume
         spotify.attachPlaybackEngine(playback)
         if nowPlayingController == nil {
@@ -295,6 +376,7 @@ final class PlaybackQueueStore {
 
     func replace(with tracks: [Track], startingAt track: Track) {
         guard !tracks.isEmpty else { return }
+        rememberQueueForUndo()
         cancelRandomPlayback()
         items = tracks.map(UnifiedQueueItem.init(local:))
         currentIndex = tracks.firstIndex(of: track) ?? 0
@@ -303,6 +385,7 @@ final class PlaybackQueueStore {
     }
 
     func replace(with result: BandcampResult) {
+        rememberQueueForUndo()
         cancelRandomPlayback()
         items = [UnifiedQueueItem(bandcamp: result)]
         currentIndex = 0
@@ -313,6 +396,7 @@ final class PlaybackQueueStore {
     func replace(with item: SpotifyCatalogItem, context: [SpotifyCatalogItem]? = nil) {
         let playableContext = (context ?? [item]).filter { !$0.uri.isEmpty }
         guard !playableContext.isEmpty else { return }
+        rememberQueueForUndo()
         cancelRandomPlayback()
         items = playableContext.map(UnifiedQueueItem.init(spotify:))
         currentIndex = playableContext.firstIndex(of: item) ?? 0
@@ -323,6 +407,7 @@ final class PlaybackQueueStore {
     func replace(with item: JellyfinCatalogItem, context: [JellyfinCatalogItem]? = nil) {
         let playableContext = (context ?? [item]).filter { $0.kind == .track }
         guard !playableContext.isEmpty else { return }
+        rememberQueueForUndo()
         cancelRandomPlayback()
         items = playableContext.map(UnifiedQueueItem.init(jellyfin:))
         currentIndex = playableContext.firstIndex(of: item) ?? 0
@@ -331,6 +416,7 @@ final class PlaybackQueueStore {
     }
 
     func replace(with item: UnifiedQueueItem) {
+        rememberQueueForUndo()
         cancelRandomPlayback()
         items = [item]
         currentIndex = 0
@@ -340,6 +426,7 @@ final class PlaybackQueueStore {
 
     func replace(with queueItems: [UnifiedQueueItem], startingAt item: UnifiedQueueItem? = nil) {
         guard !queueItems.isEmpty else { return }
+        rememberQueueForUndo()
         cancelRandomPlayback()
         items = queueItems
         currentIndex = item.flatMap { selected in
@@ -392,6 +479,7 @@ final class PlaybackQueueStore {
                 guard !candidates.isEmpty else {
                     throw RandomPlaybackError(message: "No playable music is available in \(source.title).")
                 }
+                rememberQueueForUndo()
                 items = candidates
                 currentIndex = 0
                 restoredPosition = 0
@@ -494,18 +582,23 @@ final class PlaybackQueueStore {
         cancelRandomPlayback()
         let start = upcomingStartIndex
         guard start < items.count else { return }
+        rememberQueueForUndo()
         items.removeSubrange(start...)
         persistSession()
         updateNowPlaying(force: true)
     }
 
     func clear() {
+        dispatchGeneration = UUID()
+        rememberQueueForUndo()
         cancelRandomPlayback()
+        bandcamp?.cancelPendingPlayback()
+        jellyfin?.cancelPendingPlayback()
         let source = currentItem?.source
         items = []
         currentIndex = nil
         restoredPosition = 0
-        if source == .spotify { spotify?.pause() } else { playback?.stop() }
+        if source == .spotify { spotify?.suppressForNonSpotifyPlayback() } else { playback?.stop() }
         persistSession()
         updateNowPlaying(force: true)
     }
@@ -643,7 +736,8 @@ final class PlaybackQueueStore {
 
     func localTrack(for item: UnifiedQueueItem) -> Track? {
         guard item.source == .local else { return nil }
-        return library?.tracks.first { $0.id == item.sourceID || $0.url == item.localURL }
+        return library?.allTracks.first { $0.id == item.sourceID }
+            ?? library?.tracks.first { $0.id == item.sourceID || $0.url == item.localURL }
     }
 
     func cycleRepeatMode() {
@@ -729,6 +823,8 @@ final class PlaybackQueueStore {
 
     private func dispatchCurrent() {
         guard !isDispatching, let item = currentItem else { return }
+        let generation = UUID()
+        dispatchGeneration = generation
         isDispatching = true
         defer {
             isDispatching = false
@@ -736,6 +832,7 @@ final class PlaybackQueueStore {
             updateNowPlaying(force: true)
         }
         error = nil
+        trackIssues.removeValue(forKey: "\(item.source.rawValue):\(item.sourceID)")
         spotifyHistorySession = UUID()
         spotifyHistoryNotBefore = .now
         lastSpotifyHistoryIdentity = nil
@@ -752,9 +849,9 @@ final class PlaybackQueueStore {
         case .local:
             bandcamp?.cancelPendingPlayback()
             jellyfin?.cancelPendingPlayback()
-            guard let track = localTrack(for: item) else {
-                error = "The local file for \(item.title) is no longer available."
-                DispatchQueue.main.async { [weak self] in self?.next() }
+            guard let track = localTrack(for: item), FileManager.default.isReadableFile(atPath: track.url.path) else {
+                playback?.stop()
+                reportIssue("File missing or unreadable. It may have moved, or its drive may be disconnected.", for: item, missingFile: true)
                 return
             }
             playback?.play(track, in: localPlaybackRun(startingAt: currentIndex))
@@ -763,7 +860,8 @@ final class PlaybackQueueStore {
             jellyfin?.cancelPendingPlayback()
             guard let result = item.bandcampResult, let playback, let bandcamp else { return }
             bandcamp.play(result, using: playback) { [weak self] message in
-                self?.error = "Bandcamp could not play \(item.title): \(message)"
+                guard self?.currentItem?.id == item.id, self?.dispatchGeneration == generation else { return }
+                self?.reportIssue("Bandcamp could not play this track: \(message)", for: item)
             }
             seekWhenPlaybackStarts(itemID: item.id, seconds: restoredPosition)
         case .spotify:
@@ -771,7 +869,7 @@ final class PlaybackQueueStore {
             jellyfin?.cancelPendingPlayback()
             guard let spotifyItem = item.spotifyItem else { return }
             guard spotify?.isAuthorized == true || spotify?.librespot.supportsDirectControl == true else {
-                error = "Reconnect Spotify before playing \(item.title)."
+                reportIssue("Reconnect Spotify in Settings, then retry.", for: item)
                 return
             }
             spotify?.play(spotifyItem)
@@ -780,11 +878,12 @@ final class PlaybackQueueStore {
             bandcamp?.cancelPendingPlayback()
             guard let jellyfinItem = item.jellyfinItem, let playback, let jellyfin else { return }
             guard jellyfin.isConnected else {
-                error = "Reconnect Jellyfin before playing \(item.title)."
+                reportIssue("Reconnect Jellyfin in Settings, then retry.", for: item)
                 return
             }
             jellyfin.play(jellyfinItem, using: playback) { [weak self] message in
-                self?.error = "Jellyfin could not play \(item.title): \(message)"
+                guard self?.currentItem?.id == item.id, self?.dispatchGeneration == generation else { return }
+                self?.reportIssue("Jellyfin could not play this track: \(message)", for: item)
             }
             seekWhenPlaybackStarts(itemID: item.id, seconds: restoredPosition)
         }
@@ -792,6 +891,7 @@ final class PlaybackQueueStore {
 
     private func advanceAfterCompletion() {
         guard !isDispatching else { return }
+        if let item = currentItem, issue(source: item.source, id: item.sourceID) != nil { return }
         next()
     }
 

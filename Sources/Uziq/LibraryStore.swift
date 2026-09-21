@@ -14,7 +14,9 @@ private struct ArtworkCandidate: Sendable {
 @MainActor
 @Observable
 final class LibraryStore {
+    let browsing = BrowseState()
     var tracks: [Track] = []
+    private(set) var allTracks: [Track] = []
     var searchText = ""
     var selectedSection: LibrarySection = .library
     var mostPlayedRange: MostPlayedRange = .week
@@ -68,10 +70,19 @@ final class LibraryStore {
     @ObservationIgnored private var pendingChangedRoots = Set<URL>()
     @ObservationIgnored private var folderWatchGeneration = UUID()
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
+    @ObservationIgnored private var relocatedAccessURLs: [URL] = []
 
     init(database: LibraryDatabase = LibraryDatabase(), startsAutomatically: Bool = true) {
         self.database = database
         guard startsAutomatically else { return }
+        let relocatedBookmarks = UserDefaults.standard.dictionary(forKey: "relocated-track-bookmarks") as? [String: Data] ?? [:]
+        for bookmark in relocatedBookmarks.values {
+            var stale = false
+            if let url = try? URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope], bookmarkDataIsStale: &stale),
+               url.startAccessingSecurityScopedResource() {
+                relocatedAccessURLs.append(url)
+            }
+        }
         folderRoots = bookmarks.resolvedURLs()
         playObserver = NotificationCenter.default.addObserver(
             forName: .uziqTrackPlayed,
@@ -122,6 +133,7 @@ final class LibraryStore {
     }
 
     deinit {
+        relocatedAccessURLs.forEach { $0.stopAccessingSecurityScopedResource() }
         folderWatcher.stop()
         folderWatchDebounceTask?.cancel()
         folderReconciliationTask?.cancel()
@@ -235,6 +247,24 @@ final class LibraryStore {
     }
 
     func presentFolderImporter() { showingFolderImporter = true }
+
+    func relocateTrack(id: String, to url: URL) async throws {
+        let accessed = url.startAccessingSecurityScopedResource()
+        do {
+            let metadata = try await MetadataReader.read(url.standardizedFileURL)
+            try await database.relocateTrack(id: id, to: url.standardizedFileURL, recoveredMetadata: metadata)
+            if let bookmark = try? url.bookmarkData(options: [.withSecurityScope]) {
+                var bookmarks = UserDefaults.standard.dictionary(forKey: "relocated-track-bookmarks") as? [String: Data] ?? [:]
+                bookmarks[id] = bookmark
+                UserDefaults.standard.set(bookmarks, forKey: "relocated-track-bookmarks")
+            }
+            if accessed { relocatedAccessURLs.append(url) }
+            await refresh()
+        } catch {
+            if accessed { url.stopAccessingSecurityScopedResource() }
+            throw error
+        }
+    }
 
     func importFolders(_ urls: [URL]) {
         for url in urls {
@@ -603,6 +633,7 @@ final class LibraryStore {
                 mostPlayedSince: section == .mostPlayed ? mostPlayedRange.startDate : nil
             )
             guard refreshGeneration == generation else { return }
+            allTracks = snapshot.allTracks
             tracks = snapshot.displayedTracks
             prepareBrowseSnapshot(from: snapshot.allTracks)
         } catch {

@@ -7,10 +7,9 @@ struct JellyfinLibraryView: View {
     // The detail column is reused when the sidebar selection changes. Keep its
     // bound path type-erased, like the unbound NavigationStacks in the other
     // sections, so SwiftUI never compares incompatible concrete path types.
-    @State private var path = NavigationPath()
 
     var body: some View {
-        NavigationStack(path: $path) {
+        NavigationStack(path: library.browsing.path(for: .jellyfin)) {
             VStack(alignment: .leading, spacing: 0) {
                 header
                 Group {
@@ -61,8 +60,8 @@ struct JellyfinLibraryView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            if !path.isEmpty {
-                Button { path = NavigationPath() } label: {
+            if library.browsing.paths[.jellyfin]?.isEmpty == false {
+                Button { library.browsing.paths[.jellyfin] = NavigationPath() } label: {
                     Label("Jellyfin Home", systemImage: "house.fill")
                 }
                 .buttonStyle(.bordered)
@@ -140,6 +139,7 @@ private struct JellyfinBrowseView: View {
             .padding(.horizontal, 28)
             .padding(.bottom, 32)
         }
+        .rememberBrowsePosition("jellyfin")
     }
 
     private var hasSearchResults: Bool {
@@ -311,6 +311,7 @@ private struct JellyfinCollectionDetail: View {
             }
             .padding(28)
         }
+        .rememberBrowsePosition("jellyfin-collection-\(collection.id)")
         .task(id: collection.id) {
             isLoading = true
             do { tracks = try await jellyfin.tracks(for: collection) }
@@ -359,6 +360,7 @@ private struct JellyfinArtistDetail: View {
             }
             .padding(28)
         }
+        .rememberBrowsePosition("jellyfin-artist-\(artist.id)")
         .task(id: artist.id) {
             isLoading = true
             do {
@@ -408,6 +410,7 @@ private struct JellyfinTrackList: View {
                     Button("Play Next") { queue.playNext(track) }
                     Button("Add to Queue") { queue.add(track) }
                 }
+                PlaybackIssueActions(source: .jellyfin, sourceID: track.id)
                 Divider()
             }
         }

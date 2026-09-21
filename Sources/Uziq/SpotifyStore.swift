@@ -79,6 +79,8 @@ final class SpotifyStore {
     var isLoading = false
     var isLoadingAccount = false
     var isStartingPlayback = false
+    var playbackRecoveryError: String?
+    @ObservationIgnored var helperStartupTimeout: Task<Void, Never>?
     var playbackMessage: String?
     var availableDeviceNames: [String] = []
     var rateLimitedUntil: Date?

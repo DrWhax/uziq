@@ -282,6 +282,27 @@ actor LibraryDatabase {
         return sqlite3_changes(connection) > 0
     }
 
+    func relocateTrack(id: String, to url: URL, recoveredMetadata: TrackMetadata? = nil) throws {
+        try withTransaction {
+            try execute("UPDATE tracks SET path = ?, file_name = ? WHERE id = ?", bindings: [url.path, url.lastPathComponent, id])
+            if sqlite3_changes(connection) == 0 {
+                guard let recoveredMetadata, recoveredMetadata.url.standardizedFileURL == url.standardizedFileURL else {
+                    throw UziqError.database("This track is no longer in the library.")
+                }
+                guard try optionalScalarString("SELECT id FROM tracks WHERE path = ?", bindings: [url.path]) == nil else {
+                    throw UziqError.database("That file already belongs to another library track.")
+                }
+                // Folder reconciliation may already have removed the old row.
+                // Recreate it with the queue's identity so Retry still resolves it.
+                try upsertWithoutTransaction(recoveredMetadata)
+                let insertedID = try scalarString("SELECT id FROM tracks WHERE path = ?", bindings: [url.path])
+                try execute("DELETE FROM tracks_fts WHERE track_id = ?", bindings: [insertedID])
+                try execute("UPDATE tracks SET id = ? WHERE id = ?", bindings: [id, insertedID])
+            }
+            try rebuildSearchIndex(for: id)
+        }
+    }
+
     func fetchRecentlyPlayedArtists(since: Date, limit: Int = 16) throws -> [RecentArtistPlay] {
         let statement = try prepare("""
             SELECT COALESCE(o.artist, t.artist) AS effective_artist, COUNT(ph.id), MAX(ph.played_at)

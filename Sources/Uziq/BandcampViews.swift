@@ -2,17 +2,23 @@ import AppKit
 import SwiftUI
 
 struct BandcampLibraryView: View {
+    @Environment(LibraryStore.self) private var library
     @Environment(BandcampStore.self) private var bandcamp
     @Environment(PlaybackQueueStore.self) private var queue
     @State private var showingSetup = false
-    @State private var showingSavedOnly = false
-    @State private var selectedOwnedRelease: BandcampResult?
-    @State private var selectedArtist: BandcampResult?
+    private var showingSavedOnly: Bool {
+        get { library.browsing.bandcampSavedOnly }
+        nonmutating set { library.browsing.bandcampSavedOnly = newValue }
+    }
+    private func open(_ result: BandcampResult) {
+        let route: BandcampBrowseRoute = result.type == "b" ? .artist(result) : .release(result)
+        library.browsing.paths[.bandcamp, default: NavigationPath()].append(route)
+    }
 
     var body: some View {
         @Bindable var bandcamp = bandcamp
         let displayedResults = showingSavedOnly ? bandcamp.savedResults : bandcamp.results
-        NavigationStack {
+        NavigationStack(path: library.browsing.path(for: .bandcamp)) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .lastTextBaseline) {
@@ -67,7 +73,7 @@ struct BandcampLibraryView: View {
 
                 BandcampAccountArtistCarousel(
                     artists: bandcamp.followedArtists,
-                    onOpen: { selectedArtist = $0 }
+                    onOpen: { open($0) }
                 )
                 .padding(.bottom, 22)
 
@@ -76,7 +82,7 @@ struct BandcampLibraryView: View {
                     subtitle: "Recent releases from your Bandcamp feed",
                     emptyMessage: "No new followed-artist releases were returned yet.",
                     releases: bandcamp.accountNewReleases,
-                    onOpen: { selectedOwnedRelease = $0 }
+                    onOpen: { open($0) }
                 )
                 .padding(.bottom, 22)
 
@@ -85,7 +91,7 @@ struct BandcampLibraryView: View {
                     subtitle: "\(bandcamp.wishlistResults.count) release\(bandcamp.wishlistResults.count == 1 ? "" : "s") saved to your Bandcamp account",
                     emptyMessage: "Your Bandcamp wishlist is empty.",
                     releases: bandcamp.wishlistResults,
-                    onOpen: { selectedOwnedRelease = $0 }
+                    onOpen: { open($0) }
                 )
                 .padding(.bottom, 22)
             }
@@ -164,9 +170,9 @@ struct BandcampLibraryView: View {
                         } onOpen: {
                             switch result.type {
                             case "b":
-                                selectedArtist = result
+                                open(result)
                             case "a", "t":
-                                selectedOwnedRelease = result
+                                open(result)
                             default:
                                 NSWorkspace.shared.open(result.openURL)
                             }
@@ -179,6 +185,7 @@ struct BandcampLibraryView: View {
             }
                 }
             }
+            .rememberBrowsePosition("bandcamp-\(showingSavedOnly)")
             .sheet(isPresented: $showingSetup) {
                 BandcampSubscriptionSheet()
             }
@@ -192,11 +199,11 @@ struct BandcampLibraryView: View {
                     bandcamp.refreshFeed()
                 }
             }
-            .navigationDestination(item: $selectedOwnedRelease) { result in
-                BandcampReleaseDetailView(result: result)
-            }
-            .navigationDestination(item: $selectedArtist) { artist in
-                BandcampArtistDetailView(artist: artist)
+            .navigationDestination(for: BandcampBrowseRoute.self) { route in
+                switch route {
+                case .release(let result): BandcampReleaseDetailView(result: result)
+                case .artist(let artist): BandcampArtistDetailView(artist: artist)
+                }
             }
         }
     }
@@ -337,7 +344,7 @@ struct BandcampLibraryView: View {
                                 isPreparing: bandcamp.preparingPlaybackResultID == result.id,
                                 isPlayDisabled: bandcamp.preparingPlaybackResultID != nil,
                                 onPlay: { queue.replace(with: result) },
-                                onShowDetails: { selectedOwnedRelease = result },
+                                onShowDetails: { open(result) },
                                 onOpenBrowser: { NSWorkspace.shared.open(result.openURL) }
                             )
                         }
@@ -366,9 +373,7 @@ struct BandcampArtistSubscriptionCard: View {
     let onRemove: () -> Void
 
     var body: some View {
-        NavigationLink {
-            BandcampArtistDetailView(artist: artist)
-        } label: {
+        NavigationLink(value: BandcampBrowseRoute.artist(artist)) {
             VStack(alignment: .leading, spacing: 8) {
                 ZStack(alignment: .bottomTrailing) {
                     CachedRemoteArtwork(url: artist.artworkURL) {
@@ -609,6 +614,7 @@ struct BandcampArtistDetailView: View {
             }
             .padding(28)
         }
+        .rememberBrowsePosition("bandcamp-artist-\(artist.id)")
         .task(id: artist.id) {
             await loadPage()
         }
@@ -634,9 +640,7 @@ private struct BandcampArtistReleaseRow: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            NavigationLink {
-                BandcampReleaseDetailView(result: release)
-            } label: {
+            NavigationLink(value: BandcampBrowseRoute.release(release)) {
                 HStack(spacing: 14) {
                     CachedRemoteArtwork(url: release.artworkURL) {
                         ZStack {
@@ -842,6 +846,7 @@ struct BandcampReleaseDetailView: View {
                                     Button("Open Track in Browser") { NSWorkspace.shared.open(pageURL) }
                                 }
                             }
+                            PlaybackIssueActions(source: .bandcamp, sourceID: trackResult.id)
                             Divider()
                         }
                     }
@@ -849,6 +854,7 @@ struct BandcampReleaseDetailView: View {
             }
             .padding(28)
         }
+        .rememberBrowsePosition("bandcamp-release-\(result.id)")
         .task(id: result.id) {
             isLoading = true
             error = nil
@@ -980,6 +986,7 @@ struct BandcampResultRow: View {
                 Button("Add to Queue") { queue.add(result) }
             }
         }
+        PlaybackIssueActions(source: .bandcamp, sourceID: result.id)
     }
 
     private var resultType: String {
