@@ -430,23 +430,31 @@ struct EmptyLibraryView: View {
 
 struct ArtworkView: View {
     let data: Data?
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
-        Group {
-            if let data, let image = ArtworkImageCache.shared.image(for: data) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                ZStack {
-                    LinearGradient(colors: [.indigo.opacity(0.65), .purple.opacity(0.75)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                    Image(systemName: "music.note")
-                        .font(.system(size: 34, weight: .light))
-                        .foregroundStyle(.white.opacity(0.86))
+        GeometryReader { geometry in
+            Group {
+                if let data, let image = ArtworkImageCache.shared.image(
+                    for: data,
+                    maximumPixelSize: ArtworkImageCache.pixelSize(for: geometry.size, scale: displayScale),
+                    filling: geometry.size
+                ) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    ZStack {
+                        LinearGradient(colors: [.indigo.opacity(0.65), .purple.opacity(0.75)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                        Image(systemName: "music.note")
+                            .font(.system(size: 34, weight: .light))
+                            .foregroundStyle(.white.opacity(0.86))
+                    }
                 }
             }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped()
         }
-        .clipped()
     }
 }
 
@@ -471,7 +479,7 @@ struct CachedRemoteArtwork<Placeholder: View>: View {
     }
 }
 
-private final class ArtworkImageCache: @unchecked Sendable {
+final class ArtworkImageCache: @unchecked Sendable {
     static let shared = ArtworkImageCache()
 
     private let cache = NSCache<NSString, NSImage>()
@@ -481,14 +489,42 @@ private final class ArtworkImageCache: @unchecked Sendable {
         cache.totalCostLimit = 64 * 1_024 * 1_024
     }
 
-    func image(for data: Data) -> NSImage? {
-        let key = cacheKey(for: data)
+    static func pixelSize(for size: CGSize, scale: CGFloat) -> Int {
+        let requested = max(size.width, size.height) * scale
+        // A few shared sizes avoid creating new cache entries for every resize.
+        return [96, 160, 256, 384, 512, 768].first { CGFloat($0) >= requested } ?? 768
+    }
+
+    func image(for data: Data, maximumPixelSize: Int = 768, filling targetSize: CGSize? = nil) -> NSImage? {
+        let aspectRatio = targetSize.flatMap { size -> CGFloat? in
+            guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return nil }
+            return size.width / size.height
+        }
+        let key = "\(cacheKey(for: data))-\(maximumPixelSize)-\(aspectRatio ?? 0)" as NSString
         if let image = cache.object(forKey: key) { return image }
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        var decodeSize = maximumPixelSize
+        if let aspectRatio,
+           let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+           let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+           let height = properties[kCGImagePropertyPixelHeight] as? NSNumber {
+            var sourceWidth = width.doubleValue
+            var sourceHeight = height.doubleValue
+            let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+            if (5...8).contains(orientation) { swap(&sourceWidth, &sourceHeight) }
+            if sourceWidth > 0, sourceHeight > 0 {
+                let targetWidth = Double(maximumPixelSize) * min(1, Double(aspectRatio))
+                let targetHeight = Double(maximumPixelSize) / max(1, Double(aspectRatio))
+                let fillScale = max(targetWidth / sourceWidth, targetHeight / sourceHeight)
+                // Preserve the previous 768-pixel quality ceiling, while giving
+                // the cropped short edge enough pixels for aspect-fill.
+                decodeSize = Int(min(768, ceil(max(sourceWidth, sourceHeight) * fillScale)))
+            }
+        }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 768,
+            kCGImageSourceThumbnailMaxPixelSize: decodeSize,
             kCGImageSourceShouldCacheImmediately: true
         ]
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {

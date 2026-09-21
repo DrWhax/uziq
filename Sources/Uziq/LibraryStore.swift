@@ -594,19 +594,17 @@ final class LibraryStore {
         let generation = UUID()
         refreshGeneration = generation
         let section = selectedSection
+        let query = section == .library ? searchText : ""
         do {
-            let refreshedTracks = try await database.fetchTracks(
-                search: section == .library ? searchText : nil,
-                recentlyAdded: section == .recentlyAdded,
-                favoritesOnly: false,
+            // Browse pages always describe the entire library, independently of
+            // the song search and history filters. Both views share artwork.
+            let snapshot = try await database.fetchLibrarySnapshot(
+                search: query,
                 mostPlayedSince: section == .mostPlayed ? mostPlayedRange.startDate : nil
             )
-            // Browse pages always describe the entire library, independently of
-            // the song search and history filters.
-            let browseTracks = try await database.fetchTracks()
             guard refreshGeneration == generation else { return }
-            tracks = refreshedTracks
-            prepareBrowseSnapshot(from: browseTracks)
+            tracks = snapshot.displayedTracks
+            prepareBrowseSnapshot(from: snapshot.allTracks)
         } catch {
             lastError = error.localizedDescription
         }

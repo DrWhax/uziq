@@ -170,7 +170,7 @@ struct Track: Identifiable, Hashable, Sendable {
     let addedAt: Date
     let modifiedAt: Date
     let isFavorite: Bool
-    let playCount: Int
+    var playCount: Int
 
     var displayArtist: String {
         artist.isEmpty ? "Unknown Artist" : artist

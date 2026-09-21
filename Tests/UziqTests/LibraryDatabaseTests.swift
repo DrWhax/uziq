@@ -3,6 +3,61 @@ import SQLite3
 @testable import Uziq
 
 final class LibraryDatabaseTests: XCTestCase {
+    func testLibrarySnapshotKeepsSearchAndMetadataConsistentDuringWrites() async throws {
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let before = makeMetadata(path: "/tmp/changing.flac", title: "Before")
+        let after = makeMetadata(path: "/tmp/changing.flac", title: "After")
+        try await database.upsert(before)
+        let oldSnapshot = try await database.fetchLibrarySnapshot()
+        try await database.upsert(after)
+        try await database.upsert(makeMetadata(path: "/tmp/inserted.flac", title: "After New"))
+        let updated = try await database.fetchLibrarySnapshot(search: "After")
+        XCTAssertEqual(oldSnapshot.allTracks.map(\.title), ["Before"])
+        XCTAssertEqual(Set(updated.displayedTracks.map(\.title)), ["After", "After New"])
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                for index in 0..<40 { try await database.upsert(index.isMultiple(of: 2) ? before : after) }
+            }
+            group.addTask {
+                for _ in 0..<40 {
+                    let snapshot = try await database.fetchLibrarySnapshot(search: "After")
+                    XCTAssertTrue(snapshot.displayedTracks.allSatisfy { $0.title.hasPrefix("After") })
+                    XCTAssertEqual(Set(snapshot.displayedTracks), Set(snapshot.allTracks.filter { $0.title.hasPrefix("After") }))
+                }
+            }
+            try await group.waitForAll()
+        }
+    }
+
+    func testFilteredTracksReuseSnapshotArtworkAndPreservePlayCounts() async throws {
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+        try await database.upsertBatch([
+            makeMetadata(path: "/tmp/shared-first.flac", title: "First"),
+            makeMetadata(path: "/tmp/shared-second.flac", title: "Second")
+        ])
+        let initial = try await database.fetchTracks()
+        let firstID = try XCTUnwrap(initial.first(where: { $0.title == "First" })?.id)
+        try await database.updateArtwork(trackIDs: initial.map(\.id), artworkData: Data(repeating: 42, count: 256 * 1024))
+        _ = try await database.recordPlay(trackID: firstID)
+        _ = try await database.recordPlay(trackID: firstID)
+        let snapshot = try await database.fetchLibrarySnapshot(search: "First")
+        let filtered = snapshot.displayedTracks
+        XCTAssertEqual(filtered.map(\.id), [firstID])
+        let source = try XCTUnwrap(snapshot.allTracks.first(where: { $0.id == firstID })?.artworkData)
+        let reused = try XCTUnwrap(filtered.first?.artworkData)
+        source.withUnsafeBytes { originalBytes in
+            reused.withUnsafeBytes { reusedBytes in
+                XCTAssertEqual(originalBytes.baseAddress, reusedBytes.baseAddress, "Filtering must share the artwork allocation")
+            }
+        }
+        let since = Date.now.addingTimeInterval(-60)
+        let ranked = try await database.fetchLibrarySnapshot(mostPlayedSince: since).displayedTracks
+        let independentlyLoaded = try await database.fetchTracks(mostPlayedSince: since)
+        XCTAssertEqual(ranked, independentlyLoaded)
+        XCTAssertEqual(ranked.first?.playCount, 2)
+    }
+
     @MainActor
     func testSongSearchDoesNotFilterBrowsePagesOrOtherSections() async throws {
         let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))

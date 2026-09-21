@@ -182,9 +182,46 @@ actor LibraryDatabase {
         favoritesOnly: Bool = false,
         mostPlayedSince: Date? = nil
     ) throws -> [Track] {
+        try fetchTracksReusingSnapshot(search: search, recentlyAdded: recentlyAdded,
+            favoritesOnly: favoritesOnly, mostPlayedSince: mostPlayedSince, reusing: nil)
+    }
+
+    func fetchLibrarySnapshot(
+        search: String? = nil,
+        mostPlayedSince: Date? = nil
+    ) throws -> (allTracks: [Track], displayedTracks: [Track]) {
+        // No actor suspension between reads; the transaction also protects
+        // against changes made by another SQLite connection.
+        try execute("BEGIN DEFERRED TRANSACTION")
+        do {
+            let allTracks = try fetchTracks()
+            let filtered = !(search ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || mostPlayedSince != nil
+            let displayedTracks = filtered
+                ? try fetchTracksReusingSnapshot(search: search, mostPlayedSince: mostPlayedSince, reusing: allTracks)
+                : allTracks
+            try execute("COMMIT")
+            return (allTracks, displayedTracks)
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    private func fetchTracksReusingSnapshot(
+        search: String? = nil,
+        recentlyAdded: Bool = false,
+        favoritesOnly: Bool = false,
+        mostPlayedSince: Date? = nil,
+        reusing existingTracks: [Track]?
+    ) throws -> [Track] {
+        let existingByID = existingTracks.map { Dictionary($0.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }) }
+        // A filtered view only needs IDs and play counts. Reuse the snapshot's
+        // metadata and artwork storage instead of decoding the same blobs again.
+        let columns = existingByID == nil ? Self.effectiveTrackColumns : "t.id"
         var sql = mostPlayedSince == nil
-            ? "SELECT \(Self.effectiveTrackColumns) FROM tracks t LEFT JOIN track_metadata_overrides o ON o.track_id = t.id"
-            : "SELECT \(Self.effectiveTrackColumns), COUNT(ph.id) AS play_count FROM tracks t LEFT JOIN track_metadata_overrides o ON o.track_id = t.id JOIN play_history ph ON ph.track_id = t.id"
+            ? "SELECT \(columns) FROM tracks t LEFT JOIN track_metadata_overrides o ON o.track_id = t.id"
+            : "SELECT \(columns), COUNT(ph.id) AS play_count FROM tracks t LEFT JOIN track_metadata_overrides o ON o.track_id = t.id JOIN play_history ph ON ph.track_id = t.id"
         var bindings: [String] = []
         var conditions: [String] = []
         if let search, !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -216,6 +253,13 @@ actor LibraryDatabase {
         var tracks: [Track] = []
         var artworkPool: [Data: Data] = [:]
         while sqlite3_step(statement) == SQLITE_ROW {
+            if let existingByID {
+                guard let id = sqlite3_column_text(statement, 0),
+                      var track = existingByID[String(cString: id)] else { continue }
+                if mostPlayedSince != nil { track.playCount = Int(sqlite3_column_int64(statement, 1)) }
+                tracks.append(track)
+                continue
+            }
             tracks.append(readTrack(
                 statement,
                 playCountIndex: mostPlayedSince == nil ? nil : 26,
