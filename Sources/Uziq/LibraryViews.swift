@@ -543,7 +543,7 @@ struct ArtistDetailView: View {
     private let columns = [GridItem(.adaptive(minimum: 150, maximum: 210), spacing: 20)]
 
     var body: some View {
-        NavigationStack {
+        Group {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     HStack(alignment: .center, spacing: 18) {
@@ -785,6 +785,7 @@ struct TrackRow: View {
             }
             .padding(.vertical, 9)
             .contentShape(Rectangle())
+            .nowPlayingRow(isCurrent)
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -813,6 +814,10 @@ struct TrackRow: View {
                 .environment(library)
         }
         if showsDivider { Divider() }
+    }
+
+    private var isCurrent: Bool {
+        queue.currentItem?.source == .local && queue.currentItem?.sourceID == track.id
     }
 }
 

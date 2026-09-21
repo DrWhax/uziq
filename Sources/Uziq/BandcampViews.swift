@@ -823,6 +823,10 @@ struct BandcampReleaseDetailView: View {
                             }
                             .padding(.vertical, 10)
                             .contentShape(Rectangle())
+                            .nowPlayingRow(
+                                queue.currentItem?.source == .bandcamp &&
+                                    queue.currentItem?.sourceID == trackResult.id
+                            )
                             .onTapGesture {
                                 if track.isStreamable && bandcamp.preparingPlaybackResultID == nil {
                                     queue.replace(with: trackResult)

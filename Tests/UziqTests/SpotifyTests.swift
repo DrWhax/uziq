@@ -3,6 +3,29 @@ import XCTest
 @testable import Uziq
 
 final class SpotifyTests: XCTestCase {
+    func testHelperRecoveryPreservesContextAndResumesCurrentTrack() {
+        let playlist = LibrespotIPCCommand.loadContext("spotify:playlist:collection", offsetURI: "spotify:track:first")
+        let recovered = playlist.resuming(trackURI: "spotify:track:second", positionMS: 42_000)
+        XCTAssertEqual(recovered.command, "load_context")
+        XCTAssertEqual(recovered.uri, playlist.uri)
+        XCTAssertEqual(recovered.offsetURI, "spotify:track:second")
+        XCTAssertEqual(recovered.positionMS, 42_000)
+
+        let tracks = LibrespotIPCCommand.loadTracks(["spotify:track:first", "spotify:track:second"], offsetURI: "spotify:track:first")
+        let recoveredTracks = tracks.resuming(trackURI: "spotify:track:second", positionMS: 5_000)
+        XCTAssertEqual(recoveredTracks.uris, tracks.uris)
+        XCTAssertEqual(recoveredTracks.offsetURI, "spotify:track:second")
+        XCTAssertEqual(tracks.resuming(trackURI: nil, positionMS: 0).offsetURI, tracks.offsetURI)
+    }
+
+    func testHelperAutomaticRecoveryIsBoundedAndRespectsPlaybackOwnership() {
+        XCTAssertTrue(SpotifyStore.shouldRecoverHelper(unexpected: true, suppressed: false, wasPlayingOrStarting: true, alreadyAttempted: false))
+        XCTAssertFalse(SpotifyStore.shouldRecoverHelper(unexpected: true, suppressed: false, wasPlayingOrStarting: true, alreadyAttempted: true))
+        XCTAssertFalse(SpotifyStore.shouldRecoverHelper(unexpected: false, suppressed: false, wasPlayingOrStarting: true, alreadyAttempted: false))
+        XCTAssertFalse(SpotifyStore.shouldRecoverHelper(unexpected: true, suppressed: true, wasPlayingOrStarting: true, alreadyAttempted: false))
+        XCTAssertFalse(SpotifyStore.shouldRecoverHelper(unexpected: true, suppressed: false, wasPlayingOrStarting: false, alreadyAttempted: false))
+    }
+
     @MainActor
     func testOneShotSubscriptionsReleaseWhenPublishersComplete() {
         let store = OneShotCancellableStore()

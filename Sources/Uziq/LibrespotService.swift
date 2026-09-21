@@ -16,6 +16,10 @@ final class LibrespotService {
     private(set) var isDirectPlaybackActive = false
     private(set) var isDirectPlaybackPlaying = false
     var onEvent: ((LibrespotIPCEvent) -> Void)?
+    var onExit: ((_ unexpected: Bool, _ message: String) -> Void)?
+    private var lastLoadCommand: LibrespotIPCCommand?
+
+    var canResumePlayback: Bool { supportsDirectControl && lastLoadCommand != nil }
 
     @ObservationIgnored private var process: Process?
     @ObservationIgnored private var stdinPipe: Pipe?
@@ -221,6 +225,10 @@ final class LibrespotService {
                     } else {
                         self.status = .failed("librespot exited with code \(finished.terminationStatus)")
                     }
+                    let reason = finished.terminationReason == .uncaughtSignal ? "signal" : "code"
+                    let message = "Spotify playback engine exited with \(reason) \(finished.terminationStatus)."
+                    DiagnosticsLog.shared.record("spotify", message)
+                    self.onExit?(!self.stopRequested, message)
                 }
             }
             try process.run()
@@ -236,8 +244,10 @@ final class LibrespotService {
 
     @discardableResult
     func loadContext(_ uri: String, offsetURI: String? = nil, position: Double = 0) -> Bool {
-        let accepted = send(.loadContext(uri, offsetURI: offsetURI, positionMS: milliseconds(position)))
+        let command = LibrespotIPCCommand.loadContext(uri, offsetURI: offsetURI, positionMS: milliseconds(position))
+        let accepted = send(command)
         if accepted {
+            lastLoadCommand = command
             directPlaybackURI = offsetURI
             isDirectPlaybackActive = true
             isDirectPlaybackPlaying = false
@@ -248,13 +258,26 @@ final class LibrespotService {
     @discardableResult
     func loadTracks(_ uris: [String], offsetURI: String? = nil, position: Double = 0) -> Bool {
         guard !uris.isEmpty else { return false }
-        let accepted = send(.loadTracks(uris, offsetURI: offsetURI, positionMS: milliseconds(position)))
+        let command = LibrespotIPCCommand.loadTracks(uris, offsetURI: offsetURI, positionMS: milliseconds(position))
+        let accepted = send(command)
         if accepted {
+            lastLoadCommand = command
             directPlaybackURI = offsetURI ?? uris.first
             isDirectPlaybackActive = true
             isDirectPlaybackPlaying = false
         }
         return accepted
+    }
+
+    @discardableResult
+    func recoverPlayback(trackURI: String?, position: Double) -> Bool {
+        guard let previousCommand = lastLoadCommand else { return false }
+        let command = previousCommand.resuming(trackURI: trackURI, positionMS: milliseconds(position))
+        guard send(command) else { return false }
+        directPlaybackURI = command.offsetURI
+        isDirectPlaybackActive = true
+        isDirectPlaybackPlaying = false
+        return true
     }
 
     @discardableResult
@@ -280,7 +303,8 @@ final class LibrespotService {
 
     @discardableResult
     func suppressPlayback() -> Bool {
-        let accepted = send(.transport("pause"))
+        lastLoadCommand = nil
+        let accepted = process?.isRunning == true && send(.transport("pause"))
         // Provider handoff ends ownership even before librespot acknowledges
         // the command. A late event can reactivate this state and will be
         // suppressed again by SpotifyStore.
@@ -305,6 +329,7 @@ final class LibrespotService {
     }
 
     func stop() {
+        lastLoadCommand = nil
         guard let process else {
             status = resolvedExecutableURL == nil ? .unavailable : .stopped
             return
@@ -319,6 +344,7 @@ final class LibrespotService {
     }
 
     func signOut() {
+        lastLoadCommand = nil
         if process?.isRunning == true {
             eraseCredentialsWhenStopped = true
             stop()

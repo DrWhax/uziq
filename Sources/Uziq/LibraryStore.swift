@@ -49,7 +49,7 @@ final class LibraryStore {
     private(set) var smartMixes: [SmartMix] = []
     private(set) var isInitialLoadComplete = false
 
-    @ObservationIgnored private let database = LibraryDatabase()
+    @ObservationIgnored private let database: LibraryDatabase
     @ObservationIgnored private let scanner = LibraryScanner()
     @ObservationIgnored private let bookmarks = BookmarkStore()
     @ObservationIgnored private let folderWatcher = FolderWatcher()
@@ -59,6 +59,7 @@ final class LibraryStore {
     @ObservationIgnored private var artistArtworkTask: Task<Void, Never>?
     @ObservationIgnored private var browseGroupingTask: Task<Void, Never>?
     @ObservationIgnored private var browseGroupingGeneration = UUID()
+    @ObservationIgnored private var refreshGeneration = UUID()
     @ObservationIgnored private var normalizedArtistArtwork: [String: Data] = [:]
     @ObservationIgnored private var playObserver: NSObjectProtocol?
     @ObservationIgnored private var lyricsLookupTasks: [String: Task<LocalLyricsLookupResult, Never>] = [:]
@@ -68,7 +69,9 @@ final class LibraryStore {
     @ObservationIgnored private var folderWatchGeneration = UUID()
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
 
-    init() {
+    init(database: LibraryDatabase = LibraryDatabase(), startsAutomatically: Bool = true) {
+        self.database = database
+        guard startsAutomatically else { return }
         folderRoots = bookmarks.resolvedURLs()
         playObserver = NotificationCenter.default.addObserver(
             forName: .uziqTrackPlayed,
@@ -588,15 +591,22 @@ final class LibraryStore {
     }
 
     func refresh() async {
+        let generation = UUID()
+        refreshGeneration = generation
+        let section = selectedSection
         do {
             let refreshedTracks = try await database.fetchTracks(
-                search: searchText,
-                recentlyAdded: selectedSection == .recentlyAdded,
+                search: section == .library ? searchText : nil,
+                recentlyAdded: section == .recentlyAdded,
                 favoritesOnly: false,
-                mostPlayedSince: selectedSection == .mostPlayed ? mostPlayedRange.startDate : nil
+                mostPlayedSince: section == .mostPlayed ? mostPlayedRange.startDate : nil
             )
+            // Browse pages always describe the entire library, independently of
+            // the song search and history filters.
+            let browseTracks = try await database.fetchTracks()
+            guard refreshGeneration == generation else { return }
             tracks = refreshedTracks
-            prepareBrowseSnapshot(from: refreshedTracks)
+            prepareBrowseSnapshot(from: browseTracks)
         } catch {
             lastError = error.localizedDescription
         }

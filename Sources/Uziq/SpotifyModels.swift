@@ -185,6 +185,13 @@ struct LibrespotIPCCommand: Encodable, Equatable, Sendable {
         Self(command: command)
     }
 
+    func resuming(trackURI: String?, positionMS: UInt32) -> Self {
+        var result = self
+        result.offsetURI = trackURI ?? offsetURI
+        result.positionMS = positionMS
+        return result
+    }
+
     static func seek(positionMS: UInt32) -> Self {
         Self(command: "seek", positionMS: positionMS)
     }

@@ -4,7 +4,10 @@ import SwiftUI
 struct JellyfinLibraryView: View {
     @Environment(JellyfinStore.self) private var jellyfin
     @Environment(LibraryStore.self) private var library
-    @State private var path: [JellyfinCatalogItem] = []
+    // The detail column is reused when the sidebar selection changes. Keep its
+    // bound path type-erased, like the unbound NavigationStacks in the other
+    // sections, so SwiftUI never compares incompatible concrete path types.
+    @State private var path = NavigationPath()
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -59,7 +62,7 @@ struct JellyfinLibraryView: View {
             }
             Spacer()
             if !path.isEmpty {
-                Button { path.removeAll() } label: {
+                Button { path = NavigationPath() } label: {
                     Label("Jellyfin Home", systemImage: "house.fill")
                 }
                 .buttonStyle(.bordered)
@@ -389,7 +392,12 @@ private struct JellyfinTrackList: View {
                         Text(track.durationText ?? "—").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                         Image(systemName: "play.circle.fill").font(.title3).foregroundStyle(.tint)
                     }
-                    .padding(.vertical, 9).contentShape(Rectangle())
+                    .padding(.vertical, 9)
+                    .contentShape(Rectangle())
+                    .nowPlayingRow(
+                        queue.currentItem?.source == .jellyfin &&
+                            queue.currentItem?.sourceID == track.id
+                    )
                 }
                 .buttonStyle(.plain)
                 .contextMenu {

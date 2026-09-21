@@ -108,6 +108,7 @@ final class SpotifyStore {
     @ObservationIgnored var helperPendingItem: SpotifyCatalogItem?
     @ObservationIgnored var helperAdvancesWithUziqQueue = false
     @ObservationIgnored var uziqDeviceID: String?
+    @ObservationIgnored var attemptedHelperRecovery = false
     @ObservationIgnored var localPlaybackObserver: NSObjectProtocol?
     @ObservationIgnored var toggleObserver: NSObjectProtocol?
     @ObservationIgnored weak var playbackEngine: PlaybackEngine?
@@ -152,6 +153,9 @@ final class SpotifyStore {
         }
         librespot.onEvent = { [weak self] event in
             self?.handleLibrespotEvent(event)
+        }
+        librespot.onExit = { [weak self] unexpected, message in
+            self?.handlePlaybackEngineExit(unexpected: unexpected, message: message)
         }
         configureAPISubscriptions()
         restoreAuthorization()

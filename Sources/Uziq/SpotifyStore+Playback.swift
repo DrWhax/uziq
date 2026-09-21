@@ -31,7 +31,7 @@ extension SpotifyStore {
         let pauseDirectHelper = Self.shouldPauseDirectHelper(
             supportsDirectControl: librespot.supportsDirectControl,
             isSpotifyPlaybackSuppressed: isSpotifyPlaybackSuppressed,
-            isDirectPlaybackActive: librespot.isDirectPlaybackActive,
+            isDirectPlaybackActive: librespot.isDirectPlaybackActive || librespot.canResumePlayback,
             isStartingPlayback: isStartingPlayback,
             hasPendingItem: helperPendingItem != nil
         )
@@ -90,7 +90,36 @@ extension SpotifyStore {
 
     var hasControllablePlayback: Bool {
         !isSpotifyPlaybackSuppressed &&
-            (librespot.isDirectPlaybackActive || isUziqPlaybackActive)
+            (librespot.isDirectPlaybackActive || librespot.canResumePlayback || isUziqPlaybackActive)
+    }
+
+    func handlePlaybackEngineExit(unexpected: Bool, message: String) {
+        let shouldRecover = Self.shouldRecoverHelper(
+            unexpected: unexpected,
+            suppressed: isSpotifyPlaybackSuppressed,
+            wasPlayingOrStarting: isStartingPlayback || playback?.isPlaying == true,
+            alreadyAttempted: attemptedHelperRecovery
+        )
+        uziqDeviceID = nil
+        playbackGeneration = UUID()
+        playbackRefreshCancellable?.cancel()
+        playbackRefreshCancellable = nil
+        isStartingPlayback = false
+        playbackMessage = nil
+        updateHelperPlayback(position: playback?.effectiveProgress(at: .now), isPlaying: false)
+        playbackEngine?.endSpotifyPCMStream()
+        guard unexpected, !isSpotifyPlaybackSuppressed else { return }
+        error = "\(message) Press Play to restart it."
+        if shouldRecover, librespot.canResumePlayback {
+            attemptedHelperRecovery = true
+            resume()
+        }
+    }
+
+    nonisolated static func shouldRecoverHelper(
+        unexpected: Bool, suppressed: Bool, wasPlayingOrStarting: Bool, alreadyAttempted: Bool
+    ) -> Bool {
+        unexpected && !suppressed && wasPlayingOrStarting && !alreadyAttempted
     }
 
     var isPlaying: Bool {
@@ -239,6 +268,10 @@ extension SpotifyStore {
     }
 
     func togglePlayback() {
+        if librespot.canResumePlayback, !librespot.isDirectPlaybackActive, !isSpotifyPlaybackSuppressed {
+            resume()
+            return
+        }
         if librespot.isDirectPlaybackActive, !isSpotifyPlaybackSuppressed {
             if librespot.togglePlayback() {
                 updateHelperPlayback(
@@ -261,6 +294,21 @@ extension SpotifyStore {
     }
 
     func resume() {
+        if librespot.supportsDirectControl, !isSpotifyPlaybackSuppressed, !librespot.isDirectPlaybackActive {
+            let trackURI = playback.flatMap { snapshot in
+                snapshot.itemID == helperPendingItem?.id && helperPendingItem?.kind != .track
+                    ? nil : "spotify:track:\(snapshot.itemID)"
+            }
+            if librespot.recoverPlayback(trackURI: trackURI, position: playback?.progress ?? 0) {
+                error = nil
+                isStartingPlayback = true
+                playbackMessage = "Restarting the Spotify playback engine…"
+                _ = librespot.setVolume(desiredVolume)
+            } else {
+                error = "Select a Spotify track to restart playback."
+            }
+            return
+        }
         if librespot.isDirectPlaybackActive, !isSpotifyPlaybackSuppressed, librespot.play() {
             updateHelperPlayback(position: playback?.effectiveProgress(at: .now), isPlaying: true)
             return
@@ -414,6 +462,11 @@ extension SpotifyStore {
     }
 
     func performPlayerCommand(_ publisher: AnyPublisher<Void, Error>) {
+        guard isAuthorized, !isSpotifyPlaybackSuppressed,
+              librespot.status.isRunning, uziqDeviceID != nil else {
+            error = "The Spotify playback device is disconnected. Select a track or press Play to restart it."
+            return
+        }
         guard spotifyRequestsAllowed() else { return }
         error = nil
         publisher
@@ -483,6 +536,7 @@ extension SpotifyStore {
         command: () -> Bool
     ) -> Bool {
         guard librespot.supportsDirectControl, let playbackEngine else { return false }
+        attemptedHelperRecovery = false
         isSpotifyPlaybackSuppressed = false
         playbackEngine.stopForExternalSpotifyPlayback()
         playbackGeneration = UUID()

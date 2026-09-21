@@ -8,6 +8,36 @@ private enum PlayerInspector {
     case lyrics
 }
 
+struct NowPlayingRowModifier: ViewModifier {
+    let isCurrent: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, 8)
+            .background {
+                if isCurrent {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.accentColor.opacity(0.12))
+                }
+            }
+            .overlay(alignment: .leading) {
+                if isCurrent {
+                    Capsule()
+                        .fill(Color.accentColor)
+                        .frame(width: 3)
+                        .padding(.vertical, 7)
+                        .padding(.leading, 1)
+                }
+            }
+    }
+}
+
+extension View {
+    func nowPlayingRow(_ isCurrent: Bool) -> some View {
+        modifier(NowPlayingRowModifier(isCurrent: isCurrent))
+    }
+}
+
 struct ContentView: View {
     @Environment(LibraryStore.self) private var library
     @Environment(PlaybackEngine.self) private var playback

@@ -434,6 +434,15 @@ private struct SpotifyResultRow: View {
             .buttonStyle(.bordered)
         }
         .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard item.kind != .track || (!spotify.isStartingPlayback && !item.uri.isEmpty) else { return }
+            primaryAction()
+        }
+        .nowPlayingRow(
+            item.kind == .track && queue.currentItem?.source == .spotify &&
+                queue.currentItem?.sourceID == item.id
+        )
         .contextMenu {
             if !item.uri.isEmpty {
                 Button("Play Next") { queue.playNext(item) }

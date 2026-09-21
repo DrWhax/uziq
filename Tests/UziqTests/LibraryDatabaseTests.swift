@@ -3,6 +3,35 @@ import SQLite3
 @testable import Uziq
 
 final class LibraryDatabaseTests: XCTestCase {
+    @MainActor
+    func testSongSearchDoesNotFilterBrowsePagesOrOtherSections() async throws {
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+        try await database.upsertBatch([
+            makeMetadata(path: "/tmp/first.flac", title: "First Song", artist: "First Artist", album: "First Album"),
+            makeMetadata(path: "/tmp/second.flac", title: "Second Song", artist: "Second Artist", album: "Second Album")
+        ])
+        let store = LibraryStore(database: database, startsAutomatically: false)
+        store.searchText = "First"
+        await store.refresh()
+        XCTAssertEqual(store.displayedTracks.map(\.title), ["First Song"])
+        for _ in 0..<100 where store.isPreparingBrowseSnapshot {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(store.browseSnapshot.artistCount, 2)
+        XCTAssertEqual(store.browseSnapshot.albums.count, 2)
+
+        store.selectedSection = .artists
+        await store.refresh()
+        XCTAssertEqual(store.tracks.count, 2)
+        store.selectedSection = .recentlyAdded
+        await store.refresh()
+        XCTAssertEqual(store.displayedTracks.count, 2)
+        store.selectedSection = .library
+        await store.refresh()
+        XCTAssertEqual(store.searchText, "First")
+        XCTAssertEqual(store.displayedTracks.map(\.title), ["First Song"])
+    }
+
     func testPersistentDatabaseEnablesWALForeignKeysAndCurrentSchema() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("uziq-database-health-\(UUID().uuidString)", isDirectory: true)
