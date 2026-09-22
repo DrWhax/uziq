@@ -22,6 +22,14 @@ struct LRCLIBQuery: Sendable, Equatable {
         )
     }
 
+    init?(spotify snapshot: SpotifyPlaybackSnapshot) {
+        // Context placeholders (album/playlist/URI) have no track duration.
+        // Wait for the helper's actual track metadata before querying LRCLIB.
+        guard snapshot.duration.isFinite, snapshot.duration > 0 else { return nil }
+        self.init(title: snapshot.title, artist: snapshot.artist, album: snapshot.album, duration: snapshot.duration)
+        guard isUsable, artist.caseInsensitiveCompare("Loading metadata…") != .orderedSame else { return nil }
+    }
+
     var isUsable: Bool {
         !title.isEmpty && !artist.isEmpty && artist.caseInsensitiveCompare("Unknown Artist") != .orderedSame
     }
@@ -178,6 +186,7 @@ actor LRCLIBClient {
             if !album.isEmpty, LRCLIBQuery.normalized(record.albumName) == album { score += 25 }
             if query.duration.isFinite, query.duration > 0 {
                 let difference = abs(record.duration - query.duration)
+                guard difference <= 5 else { return nil }
                 if difference <= 2 { score += 30 }
                 else if difference <= 5 { score += 15 }
             }

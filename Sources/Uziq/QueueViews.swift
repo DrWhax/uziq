@@ -236,10 +236,17 @@ struct ProviderLyricsView: View {
 
     private var lyricsIdentity: String {
         guard let source = queue.currentItem?.source else { return "none" }
-        let trackID = source == .spotify
-            ? spotify.playback?.itemID
-            : playback.currentTrack?.id
+        if source == .spotify {
+            return "spotify:\(queue.currentItem?.id.uuidString ?? ""):\(spotify.playback?.itemID ?? ""):\(spotifyLyricsQuery?.cacheKey ?? "waiting")"
+        }
+        let trackID = playback.currentTrack?.id
         return "\(source.rawValue):\(trackID ?? queue.currentItem?.sourceID ?? "")"
+    }
+
+    private var spotifyLyricsQuery: LRCLIBQuery? {
+        guard !spotify.isStartingPlayback, !spotify.isSpotifyPlaybackSuppressed,
+              let snapshot = spotify.playback else { return nil }
+        return LRCLIBQuery(spotify: snapshot)
     }
 
     private func loadLyrics() async {
@@ -289,7 +296,25 @@ struct ProviderLyricsView: View {
             state = lyrics.map { .available(LyricsPresentation(plain: $0), source: "Jellyfin") }
                 ?? .unavailable("Jellyfin has no lyrics for this track.")
         case .spotify:
-            state = .unavailable("Lyrics aren’t available through Uziq’s Spotify integration.")
+            guard let query = spotifyLyricsQuery else {
+                state = .unavailable("Waiting for Spotify track information…")
+                return
+            }
+            let identity = lyricsIdentity
+            state = .loading(provider: "LRCLIB")
+            let result = await library.remoteLyrics(for: query)
+            guard !Task.isCancelled, lyricsIdentity == identity else { return }
+            switch result {
+            case .lyrics(let lyrics):
+                let presentation = LyricsPresentation(plain: lyrics.plain, synced: lyrics.synced)
+                state = .available(presentation, source: presentation.timedLines.isEmpty ? "LRCLIB · Plain" : "LRCLIB · Synced")
+            case .instrumental:
+                state = .unavailable("LRCLIB identifies this track as instrumental.")
+            case .notFound:
+                state = .unavailable("No LRCLIB lyrics were found for this Spotify track.")
+            case .unavailable(let message):
+                state = .unavailable(message)
+            }
         }
     }
 

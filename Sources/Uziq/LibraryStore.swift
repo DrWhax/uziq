@@ -144,7 +144,10 @@ final class LibraryStore {
     }
 
     func remoteLyrics(for track: Track) async -> LocalLyricsLookupResult {
-        let query = LRCLIBQuery(track: track)
+        await remoteLyrics(for: LRCLIBQuery(track: track))
+    }
+
+    func remoteLyrics(for query: LRCLIBQuery) async -> LocalLyricsLookupResult {
         guard query.isUsable else { return .notFound }
         let key = query.cacheKey
         if let cached = try? await database.fetchCachedLyrics(key: key),

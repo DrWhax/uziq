@@ -3,6 +3,50 @@ import XCTest
 @testable import Uziq
 
 final class LRCLIBClientTests: XCTestCase {
+    func testSpotifyQueryWaitsForTrackMetadataAndIgnoresPlaybackProgress() throws {
+        func snapshot(duration: Double, album: String = "Album", progress: Double = 0, artist: String = "Artist") -> SpotifyPlaybackSnapshot {
+            SpotifyPlaybackSnapshot(itemID: "track-id", title: "Song", artist: artist, album: album,
+                artworkURL: nil, duration: duration, progress: progress, isPlaying: true,
+                deviceName: "Uziq", observedAt: .now)
+        }
+        XCTAssertNil(LRCLIBQuery(spotify: snapshot(duration: 0)))
+        XCTAssertNil(LRCLIBQuery(spotify: snapshot(duration: .nan)))
+        XCTAssertNil(LRCLIBQuery(spotify: snapshot(duration: 180, artist: "Unknown Artist")))
+        let query = try XCTUnwrap(LRCLIBQuery(spotify: snapshot(duration: 180)))
+        XCTAssertEqual(query.cacheKey, LRCLIBQuery(spotify: snapshot(duration: 180, progress: 90))?.cacheKey)
+        XCTAssertNotEqual(query.cacheKey, LRCLIBQuery(spotify: snapshot(duration: 240))?.cacheKey)
+        XCTAssertNotEqual(query.cacheKey, LRCLIBQuery(spotify: snapshot(duration: 180, album: "Live"))?.cacheKey)
+        XCTAssertEqual(query, LRCLIBQuery(title: "Song", artist: "Artist", album: "Album", duration: 180))
+    }
+
+    @MainActor
+    func testSpotifyQueryUsesPersistentSharedLyricsCache() async throws {
+        let database = LibraryDatabase(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let store = LibraryStore(database: database, startsAutomatically: false)
+        let query = LRCLIBQuery(title: "Song", artist: "Artist", album: "Album", duration: 180)
+        let lyrics = LyricsPayload(plain: "First line", synced: "[00:01.00]First line")
+        try await database.cacheLyrics(key: query.cacheKey, result: .lyrics(lyrics))
+        let result = await store.remoteLyrics(for: query)
+        XCTAssertEqual(result, .lyrics(lyrics))
+        try await database.cacheLyrics(key: query.cacheKey, result: .instrumental)
+        let instrumental = await store.remoteLyrics(for: query)
+        XCTAssertEqual(instrumental, .instrumental)
+    }
+
+    func testSearchRejectsDifferentLengthRecording() async throws {
+        LRCLIBURLProtocolStub.responses = [
+            .init(statusCode: 404, body: "{}"),
+            .init(statusCode: 200, body: """
+                [{"trackName":"Song","artistName":"Artist","albumName":"Live",
+                  "duration":300,"instrumental":false,"plainLyrics":"Wrong recording",
+                  "syncedLyrics":"[00:01.00]Wrong recording"}]
+                """)
+        ]
+        let client = LRCLIBClient(session: makeSession())
+        let result = try await client.lookup(.init(title: "Song", artist: "Artist", album: "Album", duration: 180))
+        XCTAssertEqual(result, .notFound)
+    }
+
     override func setUp() {
         super.setUp()
         LRCLIBURLProtocolStub.reset()
