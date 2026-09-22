@@ -43,6 +43,22 @@ struct SpotifyLibraryView: View {
                     .padding(.trailing, 28)
             }
         }
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                if spotify.selectedAlbum != nil || spotify.selectedArtist != nil || spotify.selectedPlaylist != nil {
+                    Button {
+                        if spotify.selectedAlbum != nil { spotify.closeAlbum() }
+                        else if spotify.selectedArtist != nil { spotify.closeArtist() }
+                        else { spotify.closePlaylist() }
+                    } label: {
+                        Label("Back", systemImage: "chevron.left")
+                    }
+                    .labelStyle(.iconOnly)
+                    .help(spotify.selectedAlbum != nil && spotify.selectedArtist != nil ? "Back to Artist" : "Back to Spotify")
+                    .accessibilityLabel("Back")
+                }
+            }
+        }
         .task {
             spotify.attachPlaybackEngine(playback)
             if spotify.isAuthorized { spotify.loadAccount() }
@@ -476,11 +492,6 @@ private struct SpotifyArtistDetail: View {
                         .clipShape(Circle())
                         .shadow(color: .black.opacity(0.2), radius: 14, y: 7)
                     VStack(alignment: .leading, spacing: 10) {
-                        Button { spotify.closeArtist() } label: {
-                            Label("Back to Spotify", systemImage: "chevron.left")
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
                         Text("Artist")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
@@ -660,14 +671,6 @@ private struct SpotifyAlbumDetail: View {
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         .shadow(color: .black.opacity(0.2), radius: 14, y: 7)
                     VStack(alignment: .leading, spacing: 9) {
-                        Button { spotify.closeAlbum() } label: {
-                            Label(
-                                spotify.selectedArtist == nil ? "Back to Spotify" : "Back to Artist",
-                                systemImage: "chevron.left"
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
                         Text("Album")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
@@ -768,11 +771,6 @@ private struct SpotifyPlaylistDetail: View {
                         .frame(width: 150, height: 150)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     VStack(alignment: .leading, spacing: 8) {
-                        Button { spotify.closePlaylist() } label: {
-                            Label("Back to Spotify", systemImage: "chevron.left")
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
                         Text(playlist.name)
                             .font(.system(size: 28, weight: .bold, design: .rounded))
                         Text(playlist.subtitle)
