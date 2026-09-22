@@ -27,6 +27,12 @@ final class BrowseState {
         Binding(get: { self.filters[section] ?? "" }, set: { self.filters[section] = $0 })
     }
 
+    func show<Route: Hashable>(_ route: Route, in section: LibrarySection) {
+        var path = NavigationPath()
+        path.append(route)
+        paths[section] = path
+    }
+
 }
 
 private struct BrowseScrollGeometry: Equatable {

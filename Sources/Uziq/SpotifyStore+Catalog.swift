@@ -5,6 +5,35 @@ import Observation
 import SpotifyWebAPI
 
 extension SpotifyStore {
+    func playerLibraryDestination(_ target: PlayerLibraryTarget, trackID: String) async throws -> SpotifyCatalogItem {
+        guard isAuthorized, spotifyRequestsAllowed(reportError: false) else {
+            throw PlayerLibraryNavigationError.unavailable
+        }
+        let uri = trackID.hasPrefix("spotify:track:") ? trackID : "spotify:track:\(trackID)"
+        do {
+            for try await track in api.track(uri).values {
+                try Task.checkCancellation()
+                return try Self.playerLibraryDestination(target, track: track)
+            }
+        } catch {
+            if !Task.isCancelled, error is RateLimitedError || error is SpotifyRateLimitResponseError {
+                handleAPIError(error)
+            }
+            throw error
+        }
+        throw PlayerLibraryNavigationError.unavailable
+    }
+
+    static func playerLibraryDestination(_ target: PlayerLibraryTarget, track: SpotifyWebAPI.Track) throws -> SpotifyCatalogItem {
+        let destination: SpotifyCatalogItem?
+        switch target {
+        case .album: destination = track.album.map(Self.catalogItem)
+        case .artist: destination = track.artists?.first.map(Self.catalogItem)
+        }
+        guard let destination, !destination.uri.isEmpty else { throw PlayerLibraryNavigationError.unavailable }
+        return destination
+    }
+
     func search(query: String) {
         let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
         self.query = normalized
@@ -386,4 +415,3 @@ struct RawPlaylist: Decodable {
         )
     }
 }
-

@@ -33,6 +33,8 @@ struct NowPlayingView: View {
                     }
                     .multilineTextAlignment(.center)
 
+                    PlayerLibraryMenu(onNavigate: { dismiss() })
+
                     PlayerTimeline(height: 42)
                     ZStack {
                         PlayerTransportControls()
@@ -140,6 +142,7 @@ struct MiniPlayerView: View {
 
                     Spacer()
                     HStack(spacing: 12) {
+                        PlayerLibraryMenu(compact: true)
                         Button(action: toggleCurrentTrackLike) {
                             Image(systemName: isCurrentTrackLiked ? "heart.fill" : "heart")
                                 .foregroundStyle(isCurrentTrackLiked ? .pink : .secondary)

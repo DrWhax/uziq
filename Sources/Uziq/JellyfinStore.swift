@@ -80,6 +80,18 @@ final class JellyfinStore {
     }
 
     var isConnected: Bool { session != nil && client?.accessToken != nil }
+
+    func playerLibraryDestination(id: String) async throws -> JellyfinCatalogItem {
+        guard let client, let session else { throw JellyfinStoreError.notConnected }
+        let generation = connectionGeneration
+        let dto = try await client.send(Paths.getItem(itemID: id, userID: session.userID)).value
+        try Task.checkCancellation()
+        guard connectionGeneration == generation else { throw CancellationError() }
+        guard let item = JellyfinCatalogItem(dto: dto), item.kind == .album || item.kind == .artist else {
+            throw PlayerLibraryNavigationError.unavailable
+        }
+        return item
+    }
     var serverName: String? { session?.serverName }
     var profileName: String? { session?.username }
     var isUsingInsecureHTTP: Bool { Self.isPlainHTTPAddress(serverAddress) }
